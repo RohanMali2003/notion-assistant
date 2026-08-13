@@ -10,6 +10,8 @@ except ImportError:
     genai = None
     types = None
 
+#check imports, it seems there's some conflict.
+
 from app.config import settings
 from app.notion_client import NotionAssistantClient
 from app.schemas import TaskAnalysis, TelegramWebhookUpdate, WebhookResponse
