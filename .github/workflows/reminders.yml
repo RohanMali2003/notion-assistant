@@ -2,7 +2,7 @@ name: Notion Reminders Cron Job
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '30 2 * * *'   # 2:30 AM UTC = 8:00 AM IST
   workflow_dispatch:
 
 jobs:
@@ -32,4 +32,4 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           APP_ENV: production
         run: |
-          python -m cron.check_reminders
+          python cron/check_reminders.py
