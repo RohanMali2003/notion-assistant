@@ -6,6 +6,13 @@ and dispatches Telegram alerts via direct HTTP POST requests without FastAPI dep
 
 import os
 import sys
+from pathlib import Path
+
+# Add project root directory to sys.path if running directly as python cron/check_reminders.py
+project_root = Path(__file__).resolve().parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 import requests
 from app.notion_client import NotionAssistantClient
 
