@@ -1,0 +1,487 @@
+import logging
+import os
+import re
+import time
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    from notion_client import Client, APIResponseError
+except ImportError:
+    Client = None
+    APIResponseError = None
+
+from app.schemas import ReminderItem
+
+logger = logging.getLogger(__name__)
+
+
+class NotionValidationError(ValueError):
+    """Raised when Notion API returns a 400 validation error."""
+
+    def __init__(self, message: str, property_name: Optional[str] = None):
+        super().__init__(message)
+        self.property_name = property_name
+
+
+class TaskDict(dict):
+    """Dictionary representing a task, supporting both dict indexing and attribute access."""
+
+    def __getattr__(self, item: str) -> Any:
+        if item in self:
+            return self[item]
+        raise AttributeError(f"'TaskDict' object has no attribute '{item}'")
+
+    def __setattr__(self, key: str, value: Any) -> None:
+        self[key] = value
+
+
+class NotionAssistantClient:
+    """Thin wrapper around notion-client for Notion API interactions."""
+
+    def __init__(self, token: Optional[str] = None, database_id: Optional[str] = None):
+        if token is None or database_id is None:
+            from app.config import settings
+            token = token or getattr(settings, "NOTION_TOKEN", None) or os.getenv("NOTION_TOKEN")
+            database_id = (
+                database_id
+                or getattr(settings, "NOTION_TASKS_DB_ID", None)
+                or os.getenv("NOTION_TASKS_DB_ID")
+                or getattr(settings, "NOTION_DATABASE_ID", None)
+                or os.getenv("NOTION_DATABASE_ID")
+            )
+
+        self.token = token
+        self.database_id = database_id
+        if Client is not None and self.token:
+            self.client = Client(auth=self.token, notion_version="2022-06-28")
+        else:
+            self.client = None
+
+    def _extract_offending_property(self, exc: Exception) -> Optional[str]:
+        raw_msgs = []
+        if hasattr(exc, "body") and isinstance(exc.body, dict):
+            raw_msgs.append(str(exc.body.get("message", "")))
+            if "notes" in exc.body:
+                raw_msgs.append(str(exc.body.get("notes")))
+        if hasattr(exc, "message"):
+            raw_msgs.append(str(exc.message))
+        raw_msgs.append(str(exc))
+
+        full_text = " ".join(raw_msgs)
+
+        match = re.search(
+            r"properties[\.\[\'\"]+(.*?)(?:[\'\"\]]|(?=\.(?:date|title|rich_text|select|status|number|checkbox|multi_select|type))|\s+should|\s+is|\s+was|\s+failed|$)",
+            full_text,
+            re.IGNORECASE,
+        )
+        if match:
+            prop = match.group(1).strip(" .['\"]")
+            if prop and prop.lower() not in ("type", "date", "title", "rich_text", "select", "status", "number", "checkbox"):
+                return prop
+
+        match = re.search(r"property [\'\"]([A-Za-z0-9_\s]+?)[\'\"]", full_text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+
+        match = re.search(r"property with name or id:\s*([A-Za-z0-9_\s]+)", full_text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+
+        for known_prop in ["Due date", "Due Date", "Description", "Priority", "Tag", "Status", "Name", "Title"]:
+            if known_prop in full_text:
+                return known_prop
+
+        return None
+
+    def _request_with_retry(self, func, *args, **kwargs):
+        if self.client is None:
+            return {}
+
+        max_attempts = 3
+        base_delay = 0.1
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return func(*args, **kwargs)
+            except Exception as exc:
+                status_code = getattr(exc, "status", None) or getattr(exc, "code", None) or getattr(exc, "status_code", None)
+                code_str = str(getattr(exc, "code", "")).lower()
+                msg_str = str(exc).lower()
+
+                is_429 = (
+                    status_code == 429
+                    or "429" in msg_str
+                    or "rate_limited" in code_str
+                    or "rate limit" in msg_str
+                )
+
+                if is_429:
+                    if attempt < max_attempts:
+                        sleep_time = base_delay * (2 ** (attempt - 1))
+                        time.sleep(sleep_time)
+                        continue
+                    else:
+                        raise exc
+
+                is_400 = (
+                    status_code == 400
+                    or "400" in msg_str
+                    or "validation_error" in code_str
+                    or "invalid" in msg_str
+                )
+
+                if is_400:
+                    offending_prop = self._extract_offending_property(exc)
+                    if offending_prop:
+                        err_msg = f"Notion API 400 Validation Error for property '{offending_prop}': {exc}"
+                        raise NotionValidationError(err_msg, property_name=offending_prop) from exc
+                    else:
+                        err_msg = f"Notion API 400 Validation Error: {exc}"
+                        raise NotionValidationError(err_msg) from exc
+
+                raise exc
+
+    def _get_db_properties_schema(self) -> Dict[str, str]:
+        """Returns dict of property_name -> property_type for target database."""
+        if hasattr(self, "_db_props_cache") and self._db_props_cache:
+            return self._db_props_cache
+        if self.client is None:
+            return {}
+        try:
+            db = self.client.databases.retrieve(self.database_id)
+            if not isinstance(db, dict):
+                return {}
+            props = db.get("properties")
+            if not isinstance(props, dict):
+                return {}
+            self._db_props_cache = {name: info.get("type") for name, info in props.items() if isinstance(info, dict)}
+            return self._db_props_cache
+        except Exception:
+            return {}
+
+    def create_task(
+        self,
+        title: str,
+        priority: Optional[str] = None,
+        tag: Optional[str] = None,
+        due_date: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Creates a page in NOTION_TASKS_DB_ID with Status=Not started."""
+        schema = self._get_db_properties_schema()
+
+        # Determine Title property key ('Task name', 'Name', 'Title', or any title type)
+        title_key = "Name"
+        if "Task name" in schema:
+            title_key = "Task name"
+        elif "Title" in schema:
+            title_key = "Title"
+        elif "Name" in schema:
+            title_key = "Name"
+        else:
+            for k, v in schema.items():
+                if v == "title":
+                    title_key = k
+                    break
+
+        properties: Dict[str, Any] = {
+            title_key: {
+                "title": [
+                    {"text": {"content": title}}
+                ]
+            },
+            "Status": {
+                "status": {
+                    "name": "Not started"
+                }
+            }
+        }
+        if priority:
+            priority_key = "Priority" if (not schema or "Priority" in schema) else "priority"
+            properties[priority_key] = {"select": {"name": priority}}
+        if tag:
+            if "Tags" in schema:
+                tag_type = schema.get("Tags")
+                if tag_type == "multi_select":
+                    properties["Tags"] = {"multi_select": [{"name": tag}]}
+                else:
+                    properties["Tags"] = {"select": {"name": tag}}
+            elif "Tag" in schema:
+                tag_type = schema.get("Tag")
+                if tag_type == "multi_select":
+                    properties["Tag"] = {"multi_select": [{"name": tag}]}
+                else:
+                    properties["Tag"] = {"select": {"name": tag}}
+            else:
+                properties["Tag"] = {"select": {"name": tag}}
+
+        if due_date is not None:
+            due_key = "Due date" if (not schema or "Due date" in schema) else ("Due Date" if "Due Date" in schema else "Due date")
+            properties[due_key] = {"date": {"start": due_date}}
+        if description is not None:
+            desc_key = "Description" if (not schema or "Description" in schema) else "description"
+            properties[desc_key] = {
+                "rich_text": [
+                    {"text": {"content": description}}
+                ]
+            }
+
+        return self._request_with_retry(
+            self.client.pages.create,
+            parent={"database_id": self.database_id},
+            properties=properties
+        )
+
+    def _parse_page_to_dict(self, page: Dict[str, Any]) -> TaskDict:
+        props = page.get("properties", {})
+
+        title = "Untitled"
+        for title_key in ("Name", "Title", "name", "title"):
+            if title_key in props:
+                title_list = props[title_key].get("title", [])
+                if title_list:
+                    title = "".join([t.get("plain_text", "") for t in title_list])
+                    break
+        if title == "Untitled":
+            for val in props.values():
+                if isinstance(val, dict) and val.get("type") == "title":
+                    title_list = val.get("title", [])
+                    if title_list:
+                        title = "".join([t.get("plain_text", "") for t in title_list])
+                        break
+
+        due_date = None
+        for date_key in ("Due date", "Due Date", "Due", "due_date"):
+            if date_key in props and isinstance(props[date_key], dict):
+                date_obj = props[date_key].get("date")
+                if date_obj and isinstance(date_obj, dict):
+                    due_date = date_obj.get("start")
+                    break
+        if due_date is None:
+            for val in props.values():
+                if isinstance(val, dict) and val.get("type") == "date":
+                    date_obj = val.get("date")
+                    if date_obj and isinstance(date_obj, dict):
+                        due_date = date_obj.get("start")
+                        break
+
+        priority = None
+        priority_prop = props.get("Priority") or props.get("priority")
+        if priority_prop and isinstance(priority_prop, dict):
+            select_obj = priority_prop.get("select")
+            if select_obj and isinstance(select_obj, dict):
+                priority = select_obj.get("name")
+
+        tag = None
+        tag_prop = props.get("Tag") or props.get("tag")
+        if tag_prop and isinstance(tag_prop, dict):
+            select_obj = tag_prop.get("select")
+            if select_obj and isinstance(select_obj, dict):
+                tag = select_obj.get("name")
+            elif "multi_select" in tag_prop:
+                ms = tag_prop.get("multi_select", [])
+                if ms and isinstance(ms, list):
+                    tag = ms[0].get("name")
+
+        return TaskDict(
+            title=title,
+            due_date=due_date,
+            priority=priority,
+            tag=tag,
+            page_id=page.get("id")
+        )
+
+    def _query_database(self, **kwargs) -> Dict[str, Any]:
+        """Queries database using databases.query or client.request depending on notion-client version."""
+        if self.client is None:
+            return {}
+        db_id = kwargs.pop("database_id", self.database_id)
+        if hasattr(self.client, "databases") and hasattr(self.client.databases, "query"):
+            return self._request_with_retry(self.client.databases.query, database_id=db_id, **kwargs)
+        elif hasattr(self.client, "request"):
+            return self._request_with_retry(
+                self.client.request,
+                path=f"databases/{db_id}/query",
+                method="POST",
+                body=kwargs
+            )
+        elif hasattr(self.client, "data_sources") and hasattr(self.client.data_sources, "query"):
+            return self._request_with_retry(self.client.data_sources.query, data_source_id=db_id, **kwargs)
+        else:
+            raise AttributeError("Installed notion-client has no endpoint for querying database")
+
+    def get_pending(self, limit: int = 5) -> List[TaskDict]:
+        """Queries DB where Status != Done, sorted by Due date ascending (nulls last)."""
+        if self.client is None:
+            return []
+
+        response = self._query_database(
+            database_id=self.database_id,
+            page_size=limit,
+            filter={
+                "property": "Status",
+                "status": {
+                    "does_not_equal": "Done"
+                }
+            },
+            sorts=[
+                {
+                    "property": "Due date",
+                    "direction": "ascending"
+                }
+            ]
+        )
+
+        tasks: List[TaskDict] = []
+        for page in response.get("results", []):
+            task = self._parse_page_to_dict(page)
+            tasks.append(task)
+
+        tasks.sort(key=lambda x: (x["due_date"] is None, x["due_date"] or ""))
+        return tasks[:limit]
+
+    def get_reminder_candidates(self) -> Tuple[List[TaskDict], List[TaskDict]]:
+        """Returns two lists of task dicts with Status != Done:
+
+        (a) tasks with Due date within the next 2 days
+        (b) tasks with Priority = High and Due date is empty
+        """
+        if self.client is None:
+            return ([], [])
+
+        results: List[Dict[str, Any]] = []
+        has_more = True
+        start_cursor = None
+
+        while has_more:
+            query_kwargs: Dict[str, Any] = {
+                "database_id": self.database_id,
+                "filter": {
+                    "property": "Status",
+                    "status": {
+                        "does_not_equal": "Done"
+                    }
+                }
+            }
+            if start_cursor:
+                query_kwargs["start_cursor"] = start_cursor
+
+            response = self._query_database(**query_kwargs)
+            results.extend(response.get("results", []))
+            has_more = response.get("has_more", False)
+            start_cursor = response.get("next_cursor")
+
+        list_a: List[TaskDict] = []
+        list_b: List[TaskDict] = []
+
+        today = datetime.now(timezone.utc).date()
+        two_days_later = today + timedelta(days=2)
+
+        for page in results:
+            task = self._parse_page_to_dict(page)
+            due_date_str = task.get("due_date")
+            priority_str = task.get("priority")
+
+            if due_date_str:
+                try:
+                    date_part = due_date_str[:10]
+                    parsed_date = datetime.strptime(date_part, "%Y-%m-%d").date()
+                    if parsed_date <= two_days_later:
+                        list_a.append(task)
+                except ValueError:
+                    pass
+            else:
+                if priority_str and str(priority_str).strip().lower() == "high":
+                    list_b.append(task)
+
+        return (list_a, list_b)
+
+    def fetch_pending_reminders(self) -> List[ReminderItem]:
+        """Fetch pending tasks/reminders as ReminderItem objects for backward compatibility."""
+        pending_tasks = self.get_pending(limit=100)
+        reminders: List[ReminderItem] = []
+        for task in pending_tasks:
+            reminders.append(
+                ReminderItem(
+                    page_id=task.get("page_id", ""),
+                    title=task.get("title", "Untitled"),
+                    due_date=task.get("due_date"),
+                    status="Pending"
+                )
+            )
+        return reminders
+
+    def mark_reminder_notified(self, page_id: str) -> Dict[str, Any]:
+        """Update Notion page status to Notified."""
+        return self._request_with_retry(
+            self.client.pages.update,
+            page_id=page_id,
+            properties={
+                "Status": {
+                    "status": {
+                        "name": "Notified"
+                    }
+                }
+            }
+        )
+
+    def get_today_tasks(self) -> List[TaskDict]:
+        """Fetch tasks where Due date matches today's date."""
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        all_pending = self.get_pending(limit=100)
+        today_tasks: List[TaskDict] = []
+        for task in all_pending:
+            due = task.get("due_date")
+            if due and due.startswith(today_str):
+                today_tasks.append(task)
+        return today_tasks
+
+    def update_task_status(
+        self,
+        title_query: str,
+        status_name: Optional[str] = None,
+        new_due_date: Optional[str] = None,
+    ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+        """Finds active task by title search and updates its Status and/or Due date."""
+        if self.client is None or not title_query:
+            return (False, title_query, None)
+
+        response = self._query_database()
+        results = response.get("results", [])
+
+        target_page_id = None
+        matched_title = title_query
+        query_norm = title_query.strip().lower()
+
+        for page in results:
+            task = self._parse_page_to_dict(page)
+            task_title = task.get("title", "")
+            if query_norm in task_title.lower() or task_title.lower() in query_norm:
+                target_page_id = page.get("id")
+                matched_title = task_title
+                break
+
+        if not target_page_id:
+            return (False, title_query, None)
+
+        schema = self._get_db_properties_schema()
+        update_props: Dict[str, Any] = {}
+
+        if status_name:
+            update_props["Status"] = {"status": {"name": status_name}}
+
+        if new_due_date:
+            due_key = "Due date" if (not schema or "Due date" in schema) else ("Due Date" if "Due Date" in schema else "Due date")
+            update_props[due_key] = {"date": {"start": new_due_date}}
+
+        if not update_props:
+            return (True, matched_title, None)
+
+        updated_page = self._request_with_retry(
+            self.client.pages.update,
+            page_id=target_page_id,
+            properties=update_props,
+        )
+        return (True, matched_title, updated_page)
+
