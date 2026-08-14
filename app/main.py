@@ -1,7 +1,8 @@
 import logging
 import os
 from typing import Any, Dict, Optional, Tuple, Union
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi.responses import PlainTextResponse
 from starlette.concurrency import run_in_threadpool
 try:
     from google import genai
@@ -294,7 +295,32 @@ def health_check():
     return WebhookResponse(status="ok")
 
 
+@app.get("/webhook")
+def whatsapp_webhook_handshake(
+    hub_mode: Optional[str] = Query(None, alias="hub.mode"),
+    hub_verify_token: Optional[str] = Query(None, alias="hub.verify_token"),
+    hub_challenge: Optional[str] = Query(None, alias="hub.challenge"),
+):
+    """WhatsApp Cloud API webhook handshake verification endpoint."""
+    expected_verify_token = os.getenv("WHATSAPP_VERIFY_TOKEN") or getattr(settings, "WHATSAPP_VERIFY_TOKEN", "")
+    if hub_mode == "subscribe" and hub_verify_token and hub_verify_token == expected_verify_token:
+        logger.info("WhatsApp webhook handshake verified successfully.")
+        return PlainTextResponse(content=hub_challenge or "", status_code=200)
+
+    logger.warning(
+        "WhatsApp webhook handshake failed: mode=%s, token match=%s",
+        hub_mode,
+        bool(hub_verify_token and hub_verify_token == expected_verify_token),
+    )
+    raise HTTPException(status_code=403, detail="Verification token mismatch")
+
+
 @app.post("/webhook")
+async def whatsapp_webhook():
+    """WhatsApp Cloud API webhook event endpoint returning EVENT_RECEIVED immediately."""
+    return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
+
+
 @app.post("/webhook/telegram")
 async def telegram_webhook(
     update: TelegramWebhookUpdate,

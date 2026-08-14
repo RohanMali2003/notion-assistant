@@ -237,12 +237,78 @@ def test_health_check(env_setup):
     assert response.json() == {"status": "ok", "message": None}
 
 
+# --- WhatsApp Webhook Handshake & Event Tests ---
+
+def test_whatsapp_webhook_handshake_success(env_setup, monkeypatch):
+    monkeypatch.setenv("WHATSAPP_VERIFY_TOKEN", "my_secret_verify_token")
+    from app.main import app
+    client = TestClient(app)
+    response = client.get(
+        "/webhook",
+        params={
+            "hub.mode": "subscribe",
+            "hub.verify_token": "my_secret_verify_token",
+            "hub.challenge": "1158201444",
+        }
+    )
+    assert response.status_code == 200
+    assert response.text == "1158201444"
+
+
+def test_whatsapp_webhook_handshake_invalid_token(env_setup, monkeypatch):
+    monkeypatch.setenv("WHATSAPP_VERIFY_TOKEN", "my_secret_verify_token")
+    from app.main import app
+    client = TestClient(app)
+    response = client.get(
+        "/webhook",
+        params={
+            "hub.mode": "subscribe",
+            "hub.verify_token": "wrong_token",
+            "hub.challenge": "1158201444",
+        }
+    )
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Verification token mismatch"}
+
+
+def test_whatsapp_webhook_handshake_invalid_mode(env_setup, monkeypatch):
+    monkeypatch.setenv("WHATSAPP_VERIFY_TOKEN", "my_secret_verify_token")
+    from app.main import app
+    client = TestClient(app)
+    response = client.get(
+        "/webhook",
+        params={
+            "hub.mode": "unsubscribe",
+            "hub.verify_token": "my_secret_verify_token",
+            "hub.challenge": "1158201444",
+        }
+    )
+    assert response.status_code == 403
+
+
+def test_whatsapp_webhook_handshake_missing_params(env_setup):
+    from app.main import app
+    client = TestClient(app)
+    response = client.get("/webhook")
+    assert response.status_code == 403
+
+
+def test_whatsapp_webhook_post_event_received(env_setup):
+    from app.main import app
+    client = TestClient(app)
+    response = client.post("/webhook", json={"object": "whatsapp_business_account", "entry": []})
+    assert response.status_code == 200
+    assert response.text == "EVENT_RECEIVED"
+
+
+# --- Telegram Webhook Tests ---
+
 def test_webhook_secret_token_unauthorized(env_setup):
     from app.main import app
     client = TestClient(app)
     payload = {"update_id": 1, "message": {"message_id": 10, "text": "Hello", "chat": {"id": 123}}}
     response = client.post(
-        "/webhook",
+        "/webhook/telegram",
         json=payload,
         headers={"X-Telegram-Bot-Api-Secret-Token": "wrong_secret"}
     )
@@ -262,7 +328,7 @@ def test_webhook_non_text_message_ignored(env_setup):
         }
     }
     response = client.post(
-        "/webhook",
+        "/webhook/telegram",
         json=payload,
         headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
     )
@@ -307,7 +373,7 @@ def test_webhook_create_task(mock_genai_cls, mock_notion_cls, mock_tg_cls, env_s
         }
     }
     response = client.post(
-        "/webhook",
+        "/webhook/telegram",
         json=payload,
         headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
     )
@@ -362,7 +428,7 @@ def test_webhook_update_task(mock_genai_cls, mock_notion_cls, mock_tg_cls, env_s
         }
     }
     response = client.post(
-        "/webhook",
+        "/webhook/telegram",
         json=payload,
         headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
     )
@@ -411,7 +477,7 @@ def test_webhook_query_pending(mock_genai_cls, mock_notion_cls, mock_tg_cls, env
         }
     }
     response = client.post(
-        "/webhook",
+        "/webhook/telegram",
         json=payload,
         headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
     )
@@ -455,7 +521,7 @@ def test_webhook_mind_module(mock_genai_cls, mock_tg_cls, env_setup):
         }
     }
     response = client.post(
-        "/webhook",
+        "/webhook/telegram",
         json=payload,
         headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
     )
@@ -499,7 +565,7 @@ def test_webhook_learning_module(mock_genai_cls, mock_tg_cls, env_setup):
         }
     }
     response = client.post(
-        "/webhook",
+        "/webhook/telegram",
         json=payload,
         headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
     )
@@ -545,7 +611,7 @@ def test_webhook_leetcode_module(mock_genai_cls, mock_tg_cls, env_setup):
         }
     }
     response = client.post(
-        "/webhook",
+        "/webhook/telegram",
         json=payload,
         headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
     )
@@ -580,7 +646,7 @@ def test_webhook_gemini_fallback_on_error(mock_genai_cls, mock_tg_cls, env_setup
         }
     }
     response = client.post(
-        "/webhook",
+        "/webhook/telegram",
         json=payload,
         headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
     )
@@ -618,11 +684,12 @@ def test_webhook_telegram_send_failure_logged_not_crashed(mock_genai_cls, mock_t
         }
     }
     response = client.post(
-        "/webhook",
+        "/webhook/telegram",
         json=payload,
         headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
     )
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
 
 
