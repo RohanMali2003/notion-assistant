@@ -2,7 +2,23 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 import app.main
-from app.schemas import ReminderItem, TaskAnalysis
+from app.main import (
+    analyze_user_text_two_stage,
+    analyze_user_text_with_gemini,
+    classify_module_stage1,
+    parse_learning_stage2,
+    parse_leetcode_stage2,
+    parse_mind_stage2,
+    parse_tasks_stage2,
+)
+from app.schemas import (
+    LearningRequest,
+    LeetcodeReviewRequest,
+    MindEntry,
+    ModuleClassification,
+    ReminderItem,
+    TaskAnalysis,
+)
 
 
 @pytest.fixture
@@ -13,6 +29,205 @@ def env_setup(monkeypatch):
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345678")
     monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "test_secret_123")
 
+
+# --- Stage 1 Unit Tests ---
+
+@patch("app.main.genai.Client")
+def test_classify_module_stage1_success(mock_genai_cls):
+    mock_client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.parsed = ModuleClassification(module="MIND", raw_text="Just drafted a new substack post")
+    mock_client.models.generate_content.return_value = mock_resp
+    mock_genai_cls.return_value = mock_client
+
+    result = classify_module_stage1("Just drafted a new substack post")
+    assert result.module == "MIND"
+    assert result.raw_text == "Just drafted a new substack post"
+
+
+@patch("app.main.genai.Client")
+def test_classify_module_stage1_json_text_fallback(mock_genai_cls):
+    mock_client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.parsed = None
+    mock_resp.text = '{"module": "LEARNING", "raw_text": "Study Raft consensus"}'
+    mock_client.models.generate_content.return_value = mock_resp
+    mock_genai_cls.return_value = mock_client
+
+    result = classify_module_stage1("Study Raft consensus")
+    assert result.module == "LEARNING"
+    assert result.raw_text == "Study Raft consensus"
+
+
+@patch("app.main.genai.Client")
+def test_classify_module_stage1_error_fallback(mock_genai_cls):
+    mock_client = MagicMock()
+    mock_client.models.generate_content.side_effect = Exception("Stage 1 API error")
+    mock_genai_cls.return_value = mock_client
+
+    result = classify_module_stage1("buy groceries tomorrow")
+    assert result.module == "TASKS"
+    assert result.raw_text == "buy groceries tomorrow"
+
+
+# --- Stage 2 Parser Unit Tests ---
+
+@patch("app.main.genai.Client")
+def test_parse_tasks_stage2_success(mock_genai_cls):
+    mock_client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.parsed = TaskAnalysis(intent="CREATE_TASK", title="Finish report", priority="High")
+    mock_client.models.generate_content.return_value = mock_resp
+    mock_genai_cls.return_value = mock_client
+
+    res = parse_tasks_stage2("Finish report High priority")
+    assert res.intent == "CREATE_TASK"
+    assert res.title == "Finish report"
+    assert res.priority == "High"
+
+
+@patch("app.main.genai.Client")
+def test_parse_tasks_stage2_error_fallback(mock_genai_cls):
+    mock_client = MagicMock()
+    mock_client.models.generate_content.side_effect = Exception("Tasks stage 2 error")
+    mock_genai_cls.return_value = mock_client
+
+    res = parse_tasks_stage2("Some random note")
+    assert res.intent == "DAILY_LOG"
+    assert res.log_content == "Some random note"
+
+
+@patch("app.main.genai.Client")
+def test_parse_mind_stage2_success(mock_genai_cls):
+    mock_client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.parsed = MindEntry(
+        entry_type="SUBSTACK_DRAFT",
+        title="Simplicity in Software",
+        content="Draft body here...",
+        summary="A draft on simplicity",
+        tags=["Substack", "Tech"],
+    )
+    mock_client.models.generate_content.return_value = mock_resp
+    mock_genai_cls.return_value = mock_client
+
+    res = parse_mind_stage2("Drafting an essay on software simplicity")
+    assert res.entry_type == "SUBSTACK_DRAFT"
+    assert res.title == "Simplicity in Software"
+    assert res.content == "Draft body here..."
+    assert res.tags == ["Substack", "Tech"]
+
+
+@patch("app.main.genai.Client")
+def test_parse_mind_stage2_error_fallback(mock_genai_cls):
+    mock_client = MagicMock()
+    mock_client.models.generate_content.side_effect = Exception("Mind stage 2 error")
+    mock_genai_cls.return_value = mock_client
+
+    res = parse_mind_stage2("My evening thoughts...")
+    assert res.entry_type == "DAILY_LOG"
+    assert res.content == "My evening thoughts..."
+
+
+@patch("app.main.genai.Client")
+def test_parse_learning_stage2_success(mock_genai_cls):
+    mock_client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.parsed = LearningRequest(
+        topic="Distributed Systems",
+        category="Computer Science",
+        goal="Master Paxos vs Raft",
+        proficiency_level="Intermediate",
+    )
+    mock_client.models.generate_content.return_value = mock_resp
+    mock_genai_cls.return_value = mock_client
+
+    res = parse_learning_stage2("I want to learn Distributed Systems, focusing on Paxos vs Raft")
+    assert res.topic == "Distributed Systems"
+    assert res.category == "Computer Science"
+    assert res.goal == "Master Paxos vs Raft"
+    assert res.proficiency_level == "Intermediate"
+
+
+@patch("app.main.genai.Client")
+def test_parse_learning_stage2_error_fallback(mock_genai_cls):
+    mock_client = MagicMock()
+    mock_client.models.generate_content.side_effect = Exception("Learning stage 2 error")
+    mock_genai_cls.return_value = mock_client
+
+    res = parse_learning_stage2("Learn Quantum Mechanics")
+    assert "Quantum" in res.topic or res.topic == "Learn Quantum Mechanics"[:50]
+    assert res.goal == "Learn Quantum Mechanics"
+
+
+@patch("app.main.genai.Client")
+def test_parse_leetcode_stage2_success(mock_genai_cls):
+    mock_client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.parsed = LeetcodeReviewRequest(
+        problem_name="Trapping Rain Water",
+        problem_number=42,
+        difficulty="Hard",
+        patterns=["Two Pointers"],
+        status="Solved",
+        review_notes="O(N) time O(1) space using two pointer technique",
+    )
+    mock_client.models.generate_content.return_value = mock_resp
+    mock_genai_cls.return_value = mock_client
+
+    res = parse_leetcode_stage2("Review LC 42 Trapping Rain Water using Two Pointers")
+    assert res.problem_name == "Trapping Rain Water"
+    assert res.problem_number == 42
+    assert res.difficulty == "Hard"
+    assert res.patterns == ["Two Pointers"]
+    assert res.status == "Solved"
+
+
+@patch("app.main.genai.Client")
+def test_parse_leetcode_stage2_error_fallback(mock_genai_cls):
+    mock_client = MagicMock()
+    mock_client.models.generate_content.side_effect = Exception("Leetcode stage 2 error")
+    mock_genai_cls.return_value = mock_client
+
+    res = parse_leetcode_stage2("Review LRU Cache problem")
+    assert res.review_notes == "Review LRU Cache problem"
+
+
+# --- Two-Stage Pipeline Tests ---
+
+@patch("app.main.parse_tasks_stage2")
+@patch("app.main.classify_module_stage1")
+def test_analyze_user_text_two_stage_tasks(mock_stage1, mock_tasks_stage2):
+    mock_stage1.return_value = ModuleClassification(module="TASKS", raw_text="buy milk")
+    mock_tasks_stage2.return_value = TaskAnalysis(intent="CREATE_TASK", title="buy milk")
+
+    module, parsed = analyze_user_text_two_stage("buy milk")
+    assert module == "TASKS"
+    assert parsed.intent == "CREATE_TASK"
+    mock_tasks_stage2.assert_called_once_with("buy milk")
+
+
+@patch("app.main.parse_mind_stage2")
+@patch("app.main.classify_module_stage1")
+def test_analyze_user_text_two_stage_mind(mock_stage1, mock_mind_stage2):
+    mock_stage1.return_value = ModuleClassification(module="MIND", raw_text="thoughts today")
+    mock_mind_stage2.return_value = MindEntry(entry_type="DAILY_LOG", content="thoughts today")
+
+    module, parsed = analyze_user_text_two_stage("thoughts today")
+    assert module == "MIND"
+    assert parsed.entry_type == "DAILY_LOG"
+    mock_mind_stage2.assert_called_once_with("thoughts today")
+
+
+@patch("app.main.parse_tasks_stage2")
+def test_analyze_user_text_with_gemini_legacy(mock_tasks_stage2):
+    mock_tasks_stage2.return_value = TaskAnalysis(intent="CREATE_TASK", title="legacy test")
+    res = analyze_user_text_with_gemini("legacy test")
+    assert res.title == "legacy test"
+    mock_tasks_stage2.assert_called_once_with("legacy test")
+
+
+# --- Endpoint & Webhook Integration Tests ---
 
 def test_health_check(env_setup):
     from app.main import app
@@ -26,7 +241,6 @@ def test_webhook_secret_token_unauthorized(env_setup):
     from app.main import app
     client = TestClient(app)
     payload = {"update_id": 1, "message": {"message_id": 10, "text": "Hello", "chat": {"id": 123}}}
-    # Invalid header token
     response = client.post(
         "/webhook",
         json=payload,
@@ -39,7 +253,6 @@ def test_webhook_secret_token_unauthorized(env_setup):
 def test_webhook_non_text_message_ignored(env_setup):
     from app.main import app
     client = TestClient(app)
-    # Update with a sticker (no message.text)
     payload = {
         "update_id": 2,
         "message": {
@@ -61,10 +274,12 @@ def test_webhook_non_text_message_ignored(env_setup):
 @patch("app.main.NotionAssistantClient")
 @patch("app.main.genai.Client")
 def test_webhook_create_task(mock_genai_cls, mock_notion_cls, mock_tg_cls, env_setup):
-    # Mock Gemini response
     mock_genai_inst = MagicMock()
-    mock_response = MagicMock()
-    mock_response.parsed = TaskAnalysis(
+    stage1_resp = MagicMock()
+    stage1_resp.parsed = ModuleClassification(module="TASKS", raw_text="Study Algorithms Chapter 4")
+
+    stage2_resp = MagicMock()
+    stage2_resp.parsed = TaskAnalysis(
         intent="CREATE_TASK",
         title="Study Algorithms",
         priority="High",
@@ -72,7 +287,7 @@ def test_webhook_create_task(mock_genai_cls, mock_notion_cls, mock_tg_cls, env_s
         due_date="2026-08-20",
         description="Chapter 4 exercises"
     )
-    mock_genai_inst.models.generate_content.return_value = mock_response
+    mock_genai_inst.models.generate_content.side_effect = [stage1_resp, stage2_resp]
     mock_genai_cls.return_value = mock_genai_inst
 
     mock_notion_inst = MagicMock()
@@ -99,7 +314,6 @@ def test_webhook_create_task(mock_genai_cls, mock_notion_cls, mock_tg_cls, env_s
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
-    # Verify Notion create_task called
     mock_notion_inst.create_task.assert_called_once_with(
         title="Study Algorithms",
         priority="High",
@@ -107,7 +321,6 @@ def test_webhook_create_task(mock_genai_cls, mock_notion_cls, mock_tg_cls, env_s
         due_date="2026-08-20",
         description="Chapter 4 exercises"
     )
-    # Verify Telegram send_message called
     mock_tg_inst.send_message.assert_called_once()
     call_args = mock_tg_inst.send_message.call_args[1]
     assert "Study Algorithms" in call_args["text"]
@@ -117,14 +330,65 @@ def test_webhook_create_task(mock_genai_cls, mock_notion_cls, mock_tg_cls, env_s
 @patch("app.main.TelegramAssistantClient")
 @patch("app.main.NotionAssistantClient")
 @patch("app.main.genai.Client")
+def test_webhook_update_task(mock_genai_cls, mock_notion_cls, mock_tg_cls, env_setup):
+    mock_genai_inst = MagicMock()
+    stage1_resp = MagicMock()
+    stage1_resp.parsed = ModuleClassification(module="TASKS", raw_text="mark pack for college in progress")
+
+    stage2_resp = MagicMock()
+    stage2_resp.parsed = TaskAnalysis(
+        intent="UPDATE_TASK",
+        title="pack for college",
+        target_status="In progress"
+    )
+    mock_genai_inst.models.generate_content.side_effect = [stage1_resp, stage2_resp]
+    mock_genai_cls.return_value = mock_genai_inst
+
+    mock_notion_inst = MagicMock()
+    mock_notion_inst.update_task_status.return_value = (True, "Pack for College", {"id": "page-123"})
+    mock_notion_cls.return_value = mock_notion_inst
+
+    mock_tg_inst = MagicMock()
+    mock_tg_cls.return_value = mock_tg_inst
+
+    from app.main import app
+    client = TestClient(app)
+    payload = {
+        "update_id": 7,
+        "message": {
+            "message_id": 16,
+            "text": "mark pack for college in progress",
+            "chat": {"id": 5555}
+        }
+    }
+    response = client.post(
+        "/webhook",
+        json=payload,
+        headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+    mock_notion_inst.update_task_status.assert_called_once_with(
+        title_query="pack for college",
+        status_name="In progress",
+        new_due_date=None
+    )
+    mock_tg_inst.send_message.assert_called_once()
+    assert "Pack for College" in mock_tg_inst.send_message.call_args[1]["text"]
+
+
+@patch("app.main.TelegramAssistantClient")
+@patch("app.main.NotionAssistantClient")
+@patch("app.main.genai.Client")
 def test_webhook_query_pending(mock_genai_cls, mock_notion_cls, mock_tg_cls, env_setup):
     mock_genai_inst = MagicMock()
-    mock_response = MagicMock()
-    mock_response.parsed = TaskAnalysis(
-        intent="QUERY_PENDING",
-        title="Query tasks"
-    )
-    mock_genai_inst.models.generate_content.return_value = mock_response
+    stage1_resp = MagicMock()
+    stage1_resp.parsed = ModuleClassification(module="TASKS", raw_text="What are my pending tasks?")
+
+    stage2_resp = MagicMock()
+    stage2_resp.parsed = TaskAnalysis(intent="QUERY_PENDING", title="Query tasks")
+    mock_genai_inst.models.generate_content.side_effect = [stage1_resp, stage2_resp]
     mock_genai_cls.return_value = mock_genai_inst
 
     mock_notion_inst = MagicMock()
@@ -161,6 +425,141 @@ def test_webhook_query_pending(mock_genai_cls, mock_notion_cls, mock_tg_cls, env
 
 @patch("app.main.TelegramAssistantClient")
 @patch("app.main.genai.Client")
+def test_webhook_mind_module(mock_genai_cls, mock_tg_cls, env_setup):
+    mock_genai_inst = MagicMock()
+    stage1_resp = MagicMock()
+    stage1_resp.parsed = ModuleClassification(module="MIND", raw_text="Idea for new Substack post about AI tools")
+
+    stage2_resp = MagicMock()
+    stage2_resp.parsed = MindEntry(
+        entry_type="SUBSTACK_DRAFT",
+        title="AI Tools in 2026",
+        content="Full draft content here...",
+        summary="A review of modern AI tools.",
+        tags=["Substack", "AI"],
+    )
+    mock_genai_inst.models.generate_content.side_effect = [stage1_resp, stage2_resp]
+    mock_genai_cls.return_value = mock_genai_inst
+
+    mock_tg_inst = MagicMock()
+    mock_tg_cls.return_value = mock_tg_inst
+
+    from app.main import app
+    client = TestClient(app)
+    payload = {
+        "update_id": 8,
+        "message": {
+            "message_id": 17,
+            "text": "Idea for new Substack post about AI tools",
+            "chat": {"id": 4444}
+        }
+    }
+    response = client.post(
+        "/webhook",
+        json=payload,
+        headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+    mock_tg_inst.send_message.assert_called_once()
+    sent_text = mock_tg_inst.send_message.call_args[1]["text"]
+    assert "Mind Entry (SUBSTACK_DRAFT)" in sent_text
+    assert "AI Tools in 2026" in sent_text
+
+
+@patch("app.main.TelegramAssistantClient")
+@patch("app.main.genai.Client")
+def test_webhook_learning_module(mock_genai_cls, mock_tg_cls, env_setup):
+    mock_genai_inst = MagicMock()
+    stage1_resp = MagicMock()
+    stage1_resp.parsed = ModuleClassification(module="LEARNING", raw_text="I want to study Distributed Consensus")
+
+    stage2_resp = MagicMock()
+    stage2_resp.parsed = LearningRequest(
+        topic="Distributed Consensus",
+        category="Computer Science",
+        proficiency_level="Intermediate",
+        goal="Understand Raft algorithm details",
+    )
+    mock_genai_inst.models.generate_content.side_effect = [stage1_resp, stage2_resp]
+    mock_genai_cls.return_value = mock_genai_inst
+
+    mock_tg_inst = MagicMock()
+    mock_tg_cls.return_value = mock_tg_inst
+
+    from app.main import app
+    client = TestClient(app)
+    payload = {
+        "update_id": 9,
+        "message": {
+            "message_id": 18,
+            "text": "I want to study Distributed Consensus",
+            "chat": {"id": 3333}
+        }
+    }
+    response = client.post(
+        "/webhook",
+        json=payload,
+        headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+    mock_tg_inst.send_message.assert_called_once()
+    sent_text = mock_tg_inst.send_message.call_args[1]["text"]
+    assert "Learning Topic Added" in sent_text
+    assert "Distributed Consensus" in sent_text
+
+
+@patch("app.main.TelegramAssistantClient")
+@patch("app.main.genai.Client")
+def test_webhook_leetcode_module(mock_genai_cls, mock_tg_cls, env_setup):
+    mock_genai_inst = MagicMock()
+    stage1_resp = MagicMock()
+    stage1_resp.parsed = ModuleClassification(module="LEETCODE", raw_text="Review LC 42 Trapping Rain Water")
+
+    stage2_resp = MagicMock()
+    stage2_resp.parsed = LeetcodeReviewRequest(
+        problem_name="Trapping Rain Water",
+        problem_number=42,
+        difficulty="Hard",
+        patterns=["Two Pointers"],
+        status="Review Needed",
+        review_notes="Pay attention to left_max vs right_max boundaries",
+    )
+    mock_genai_inst.models.generate_content.side_effect = [stage1_resp, stage2_resp]
+    mock_genai_cls.return_value = mock_genai_inst
+
+    mock_tg_inst = MagicMock()
+    mock_tg_cls.return_value = mock_tg_inst
+
+    from app.main import app
+    client = TestClient(app)
+    payload = {
+        "update_id": 10,
+        "message": {
+            "message_id": 19,
+            "text": "Review LC 42 Trapping Rain Water",
+            "chat": {"id": 2222}
+        }
+    }
+    response = client.post(
+        "/webhook",
+        json=payload,
+        headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+    mock_tg_inst.send_message.assert_called_once()
+    sent_text = mock_tg_inst.send_message.call_args[1]["text"]
+    assert "LeetCode Review Logged" in sent_text
+    assert "Trapping Rain Water" in sent_text
+
+
+@patch("app.main.TelegramAssistantClient")
+@patch("app.main.genai.Client")
 def test_webhook_gemini_fallback_on_error(mock_genai_cls, mock_tg_cls, env_setup):
     mock_genai_inst = MagicMock()
     mock_genai_inst.models.generate_content.side_effect = Exception("API rate limit exceeded")
@@ -188,7 +587,6 @@ def test_webhook_gemini_fallback_on_error(mock_genai_cls, mock_tg_cls, env_setup
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
-    # Telegram send_message should receive fallback daily log with raw text
     mock_tg_inst.send_message.assert_called_once()
     assert raw_text in mock_tg_inst.send_message.call_args[1]["text"]
 
@@ -197,9 +595,12 @@ def test_webhook_gemini_fallback_on_error(mock_genai_cls, mock_tg_cls, env_setup
 @patch("app.main.genai.Client")
 def test_webhook_telegram_send_failure_logged_not_crashed(mock_genai_cls, mock_tg_cls, env_setup):
     mock_genai_inst = MagicMock()
-    mock_response = MagicMock()
-    mock_response.parsed = TaskAnalysis(intent="DAILY_LOG", log_content="Daily summary")
-    mock_genai_inst.models.generate_content.return_value = mock_response
+    stage1_resp = MagicMock()
+    stage1_resp.parsed = ModuleClassification(module="TASKS", raw_text="Daily summary note")
+
+    stage2_resp = MagicMock()
+    stage2_resp.parsed = TaskAnalysis(intent="DAILY_LOG", log_content="Daily summary")
+    mock_genai_inst.models.generate_content.side_effect = [stage1_resp, stage2_resp]
     mock_genai_cls.return_value = mock_genai_inst
 
     mock_tg_inst = MagicMock()
@@ -221,55 +622,7 @@ def test_webhook_telegram_send_failure_logged_not_crashed(mock_genai_cls, mock_t
         json=payload,
         headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
     )
-    # Must not crash request, returns ok
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
-
-@patch("app.main.TelegramAssistantClient")
-@patch("app.main.NotionAssistantClient")
-@patch("app.main.genai.Client")
-def test_webhook_update_task(mock_genai_cls, mock_notion_cls, mock_tg_cls, env_setup):
-    mock_genai_inst = MagicMock()
-    mock_response = MagicMock()
-    mock_response.parsed = TaskAnalysis(
-        intent="UPDATE_TASK",
-        title="pack for college",
-        target_status="In progress"
-    )
-    mock_genai_inst.models.generate_content.return_value = mock_response
-    mock_genai_cls.return_value = mock_genai_inst
-
-    mock_notion_inst = MagicMock()
-    mock_notion_inst.update_task_status.return_value = (True, "Pack for College", {"id": "page-123"})
-    mock_notion_cls.return_value = mock_notion_inst
-
-    mock_tg_inst = MagicMock()
-    mock_tg_cls.return_value = mock_tg_inst
-
-    from app.main import app
-    client = TestClient(app)
-    payload = {
-        "update_id": 7,
-        "message": {
-            "message_id": 16,
-            "text": "mark pack for college in progress",
-            "chat": {"id": 5555}
-        }
-    }
-    response = client.post(
-        "/webhook",
-        json=payload,
-        headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
-    )
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
-
-    mock_notion_inst.update_task_status.assert_called_once_with(
-        title_query="pack for college",
-        status_name="In progress",
-        new_due_date=None
-    )
-    mock_tg_inst.send_message.assert_called_once()
-    assert "Pack for College" in mock_tg_inst.send_message.call_args[1]["text"]
 
