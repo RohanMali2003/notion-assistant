@@ -35,6 +35,10 @@ class Settings:
     NOTION_DATABASE_ID: str = os.environ["NOTION_DATABASE_ID"]
     TELEGRAM_BOT_TOKEN: str = os.environ["TELEGRAM_BOT_TOKEN"]
     TELEGRAM_CHAT_ID: str = os.environ["TELEGRAM_CHAT_ID"]
+    NOTION_TASKS_DB_ID: str = os.getenv("NOTION_TASKS_DB_ID", os.environ.get("NOTION_DATABASE_ID", ""))
+    NOTION_SUBSTACK_ID: str = os.getenv("NOTION_SUBSTACK_ID", "")
+    NOTION_RAMBLINGS_ID: str = os.getenv("NOTION_RAMBLINGS_ID", "")
+    NOTION_DAILY_LOGS_ID: str = os.getenv("NOTION_DAILY_LOGS_ID", "")
     APP_ENV: str = os.getenv("APP_ENV", "production")
     PORT: int = int(os.getenv("PORT", "8000"))
     WEBHOOK_SECRET: str = os.getenv("WEBHOOK_SECRET", "")

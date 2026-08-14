@@ -56,16 +56,19 @@ def test_module_enum_members():
 # --- Stage 2: MindEntry Tests ---
 
 def test_mind_entry_full_payload():
-    """Test MindEntry with all fields populated."""
+    """Test MindEntry with all fields populated including core_thesis."""
     entry = MindEntry(
-        entry_type="SUBSTACK_DRAFT",
+        entry_type="DRAFT_SUBSTACK",
         title="Why Simple Systems Scale",
+        core_thesis="Simple systems scale because they eliminate unnecessary coordination overhead.",
         content="Long-form essay draft discussing minimalism in distributed architecture...",
         summary="A draft exploring system simplicity.",
         tags=["Architecture", "Essays", "Substack"],
     )
-    assert entry.entry_type == "SUBSTACK_DRAFT"
+    assert entry.entry_type == "DRAFT_SUBSTACK"
+    assert entry.sub_intent == "DRAFT_SUBSTACK"
     assert entry.title == "Why Simple Systems Scale"
+    assert entry.core_thesis == "Simple systems scale because they eliminate unnecessary coordination overhead."
     assert "distributed architecture" in entry.content
     assert entry.summary == "A draft exploring system simplicity."
     assert entry.tags == ["Architecture", "Essays", "Substack"]
@@ -75,13 +78,22 @@ def test_mind_entry_defaults():
     """Test MindEntry defaults."""
     entry = MindEntry(content="Random thought during my walk.")
     assert entry.entry_type == "DAILY_LOG"
+    assert entry.sub_intent == "DAILY_LOG"
     assert entry.title is None
+    assert entry.core_thesis is None
     assert entry.content == "Random thought during my walk."
     assert entry.summary is None
     assert entry.tags == []
 
 
-@pytest.mark.parametrize("entry_type_val", ["SUBSTACK_DRAFT", "RAMBLING", "DAILY_LOG"])
+def test_mind_entry_substack_alias():
+    """Test MindEntry sub_intent normalizes SUBSTACK_DRAFT to DRAFT_SUBSTACK."""
+    entry = MindEntry(entry_type="SUBSTACK_DRAFT", content="Draft")
+    assert entry.entry_type == "SUBSTACK_DRAFT"
+    assert entry.sub_intent == "DRAFT_SUBSTACK"
+
+
+@pytest.mark.parametrize("entry_type_val", ["DRAFT_SUBSTACK", "SUBSTACK_DRAFT", "RAMBLING", "DAILY_LOG"])
 def test_mind_entry_valid_types(entry_type_val):
     """Test all supported MindEntry entry_types."""
     entry = MindEntry(entry_type=entry_type_val, content="Some thought")

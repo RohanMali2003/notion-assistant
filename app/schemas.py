@@ -58,13 +58,17 @@ AgentAction = TaskAnalysis
 
 class MindEntry(BaseModel):
     """Structured output schema for MIND module (substack drafts, rambling, daily logs)."""
-    entry_type: Literal["SUBSTACK_DRAFT", "RAMBLING", "DAILY_LOG"] = Field(
+    entry_type: Literal["DRAFT_SUBSTACK", "SUBSTACK_DRAFT", "RAMBLING", "DAILY_LOG"] = Field(
         default="DAILY_LOG",
-        description="Type of mind entry: SUBSTACK_DRAFT, RAMBLING, or DAILY_LOG."
+        description="Type of mind entry: DRAFT_SUBSTACK (or SUBSTACK_DRAFT), RAMBLING, or DAILY_LOG."
     )
     title: Optional[str] = Field(
         default=None,
         description="Optional headline or title for the entry or draft."
+    )
+    core_thesis: Optional[str] = Field(
+        default=None,
+        description="One-sentence core thesis extracted from the entry."
     )
     content: str = Field(
         default="",
@@ -78,6 +82,14 @@ class MindEntry(BaseModel):
         default_factory=list,
         description="Tags or topics associated with the entry."
     )
+
+    @property
+    def sub_intent(self) -> str:
+        """Alias for entry_type normalized to DRAFT_SUBSTACK, RAMBLING, or DAILY_LOG."""
+        if self.entry_type == "SUBSTACK_DRAFT":
+            return "DRAFT_SUBSTACK"
+        return self.entry_type
+
 
 
 class LearningRequest(BaseModel):

@@ -140,9 +140,10 @@ def parse_tasks_stage2(text: str) -> TaskAnalysis:
 
 STAGE2_MIND_INSTRUCTION = (
     "Extract mind/thought entry details from the user message:\n"
-    "- entry_type: SUBSTACK_DRAFT (article drafts, essays, long-form ideas), RAMBLING (stream of consciousness, quick thoughts), or DAILY_LOG (daily reflections, logs).\n"
-    "- title: Optional concise title or headline.\n"
-    "- content: Main drafted text, reflections, or notes.\n"
+    "- entry_type: DRAFT_SUBSTACK (article drafts, newsletter ideas, essays), RAMBLING (stream of consciousness, quick thoughts, brain dumps), or DAILY_LOG (daily reflections, logs, journaling).\n"
+    "- title: A concise, descriptive title or headline for the database entry.\n"
+    "- core_thesis: Exactly one sentence summarizing the core thesis, key insight, or main premise.\n"
+    "- content: The complete text, thoughts, or drafted body.\n"
     "- summary: Optional brief summary or key takeaways.\n"
     "- tags: Relevant topics or tags."
 )
@@ -164,17 +165,36 @@ def parse_mind_stage2(text: str) -> MindEntry:
         )
         if response.parsed:
             if isinstance(response.parsed, MindEntry):
-                return response.parsed
-            return MindEntry.model_validate(response.parsed)
+                result = response.parsed
+            else:
+                result = MindEntry.model_validate(response.parsed)
+            if not result.content:
+                result.content = text
+            if not result.title:
+                result.title = text[:50] if text else "Untitled Entry"
+            if not result.core_thesis:
+                first_sent = (result.content or text).strip().split(".")[0].strip()
+                result.core_thesis = (first_sent + ".") if first_sent else "Daily reflection."
+            return result
         elif response.text:
-            return MindEntry.model_validate_json(response.text)
+            result = MindEntry.model_validate_json(response.text)
+            if not result.content:
+                result.content = text
+            if not result.title:
+                result.title = text[:50] if text else "Untitled Entry"
+            if not result.core_thesis:
+                first_sent = (result.content or text).strip().split(".")[0].strip()
+                result.core_thesis = (first_sent + ".") if first_sent else "Daily reflection."
+            return result
         else:
             raise ValueError("Empty response from Gemini Stage 2 MIND parser")
     except Exception as exc:
         logger.warning("Stage 2 MIND parsing failed (%s). Falling back to default MindEntry.", exc)
+        first_sent = text.strip().split(".")[0].strip() if text else "Daily reflection"
         return MindEntry(
             entry_type="DAILY_LOG",
             title=text[:50] if text else "Daily Reflection",
+            core_thesis=(first_sent + ".") if first_sent and not first_sent.endswith(".") else first_sent,
             content=text,
         )
 
@@ -417,9 +437,29 @@ async def telegram_webhook(
 
         elif module == "MIND":
             mind_entry: MindEntry = parsed_result
-            title_part = f": *{mind_entry.title}*" if mind_entry.title else ""
-            reply_text = f"🧠 *Mind Entry ({mind_entry.entry_type})*{title_part}\n{mind_entry.content or text}"
-            if mind_entry.summary:
+            entry_title = mind_entry.title or (text[:50] if text else "Untitled Entry")
+            entry_content = mind_entry.content or text
+            entry_sub_intent = mind_entry.sub_intent or "DAILY_LOG"
+
+            await run_in_threadpool(
+                notion_client.create_mind_entry,
+                entry_type=entry_sub_intent,
+                title=entry_title,
+                content=entry_content,
+                core_thesis=mind_entry.core_thesis,
+                tags=mind_entry.tags,
+            )
+
+            if entry_sub_intent == "DRAFT_SUBSTACK":
+                reply_text = f"✍️ *Substack Draft Created (Idea):* *{entry_title}*"
+            elif entry_sub_intent == "RAMBLING":
+                reply_text = f"💭 *Rambling Recorded:* *{entry_title}*"
+            else:
+                reply_text = f"📝 *Daily Log Recorded:* *{entry_title}*"
+
+            if mind_entry.core_thesis:
+                reply_text += f"\n💡 *Core Thesis:* {mind_entry.core_thesis}"
+            elif mind_entry.summary:
                 reply_text += f"\n📌 *Summary:* {mind_entry.summary}"
             if mind_entry.tags:
                 reply_text += f"\n🏷 Tags: {', '.join(mind_entry.tags)}"

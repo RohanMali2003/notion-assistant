@@ -39,20 +39,50 @@ class TaskDict(dict):
 class NotionAssistantClient:
     """Thin wrapper around notion-client for Notion API interactions."""
 
-    def __init__(self, token: Optional[str] = None, database_id: Optional[str] = None):
-        if token is None or database_id is None:
-            from app.config import settings
-            token = token or getattr(settings, "NOTION_TOKEN", None) or os.getenv("NOTION_TOKEN")
-            database_id = (
-                database_id
-                or getattr(settings, "NOTION_TASKS_DB_ID", None)
+    def __init__(
+        self,
+        token: Optional[str] = None,
+        database_id: Optional[str] = None,
+        tasks_db_id: Optional[str] = None,
+        substack_db_id: Optional[str] = None,
+        ramblings_db_id: Optional[str] = None,
+        daily_logs_db_id: Optional[str] = None,
+    ):
+        from app.config import settings
+
+        self.token = token or getattr(settings, "NOTION_TOKEN", None) or os.getenv("NOTION_TOKEN")
+        if tasks_db_id is not None:
+            tasks_id = tasks_db_id
+        elif database_id is not None:
+            tasks_id = database_id
+        else:
+            tasks_id = (
+                getattr(settings, "NOTION_TASKS_DB_ID", None)
                 or os.getenv("NOTION_TASKS_DB_ID")
                 or getattr(settings, "NOTION_DATABASE_ID", None)
                 or os.getenv("NOTION_DATABASE_ID")
             )
 
-        self.token = token
-        self.database_id = database_id
+        self.database_id = tasks_id
+        self.tasks_db_id = tasks_id
+
+        if substack_db_id is not None:
+            self.substack_db_id = substack_db_id
+        else:
+            self.substack_db_id = getattr(settings, "NOTION_SUBSTACK_ID", None) or os.getenv("NOTION_SUBSTACK_ID", "")
+
+        if ramblings_db_id is not None:
+            self.ramblings_db_id = ramblings_db_id
+        else:
+            self.ramblings_db_id = getattr(settings, "NOTION_RAMBLINGS_ID", None) or os.getenv("NOTION_RAMBLINGS_ID", "")
+
+        if daily_logs_db_id is not None:
+            self.daily_logs_db_id = daily_logs_db_id
+        else:
+            self.daily_logs_db_id = getattr(settings, "NOTION_DAILY_LOGS_ID", None) or os.getenv("NOTION_DAILY_LOGS_ID", "")
+
+        self._db_props_cache: Dict[str, Dict[str, str]] = {}
+
         if Client is not None and self.token:
             self.client = Client(auth=self.token, notion_version="2022-06-28")
         else:
@@ -142,23 +172,182 @@ class NotionAssistantClient:
 
                 raise exc
 
-    def _get_db_properties_schema(self) -> Dict[str, str]:
+    def _get_db_properties_schema(self, database_id: Optional[str] = None) -> Dict[str, str]:
         """Returns dict of property_name -> property_type for target database."""
-        if hasattr(self, "_db_props_cache") and self._db_props_cache:
-            return self._db_props_cache
+        target_db = database_id or self.database_id
+        if not target_db:
+            return {}
+        if not hasattr(self, "_db_props_cache") or self._db_props_cache is None:
+            self._db_props_cache = {}
+        if target_db in self._db_props_cache:
+            return self._db_props_cache[target_db]
         if self.client is None:
             return {}
         try:
-            db = self.client.databases.retrieve(self.database_id)
+            db = self.client.databases.retrieve(target_db)
             if not isinstance(db, dict):
                 return {}
             props = db.get("properties")
             if not isinstance(props, dict):
                 return {}
-            self._db_props_cache = {name: info.get("type") for name, info in props.items() if isinstance(info, dict)}
-            return self._db_props_cache
+            schema = {name: info.get("type") for name, info in props.items() if isinstance(info, dict)}
+            self._db_props_cache[target_db] = schema
+            return schema
         except Exception:
             return {}
+
+    def _build_mind_blocks(self, core_thesis: Optional[str], content: str) -> List[Dict[str, Any]]:
+        """Constructs child paragraph blocks: 1st block is the core thesis, followed by full text paragraphs."""
+        blocks: List[Dict[str, Any]] = []
+
+        def make_paragraph_block(text_content: str) -> Dict[str, Any]:
+            return {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [
+                        {
+                            "type": "text",
+                            "text": {"content": text_content}
+                        }
+                    ]
+                }
+            }
+
+        # 1. First block: One-sentence core thesis
+        if core_thesis and core_thesis.strip():
+            thesis_clean = core_thesis.strip()
+            for i in range(0, len(thesis_clean), 2000):
+                blocks.append(make_paragraph_block(thesis_clean[i:i + 2000]))
+
+        # 2. Following blocks: Full text content
+        if content and content.strip():
+            lines = content.strip().split("\n")
+            for line in lines:
+                line_str = line.strip()
+                if not line_str:
+                    blocks.append(make_paragraph_block(""))
+                    continue
+                for i in range(0, len(line_str), 2000):
+                    blocks.append(make_paragraph_block(line_str[i:i + 2000]))
+
+        if not blocks:
+            blocks.append(make_paragraph_block(""))
+
+        return blocks
+
+    def create_mind_entry(
+        self,
+        entry_type: str,
+        title: str,
+        content: str,
+        core_thesis: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Creates a new row in the appropriate MIND Notion database (Substack, Ramblings, or Daily Logs)
+
+        and appends child blocks with the core thesis and full body text.
+        """
+        normalized_type = entry_type.upper()
+        if normalized_type in ("SUBSTACK_DRAFT", "DRAFT_SUBSTACK", "SUBSTACK"):
+            target_db_id = self.substack_db_id
+            destination_type = "DRAFT_SUBSTACK"
+        elif normalized_type in ("RAMBLING", "RAMBLINGS", "THOUGHT", "BRAIN_DUMP"):
+            target_db_id = self.ramblings_db_id
+            destination_type = "RAMBLING"
+        elif normalized_type in ("DAILY_LOG", "DAILY_LOGS", "LOG", "REFLECTION"):
+            target_db_id = self.daily_logs_db_id
+            destination_type = "DAILY_LOG"
+        else:
+            target_db_id = self.daily_logs_db_id
+            destination_type = "DAILY_LOG"
+
+        if not target_db_id:
+            raise ValueError(
+                f"Notion database ID for MIND entry type '{destination_type}' is not configured."
+            )
+
+        if self.tasks_db_id and target_db_id == self.tasks_db_id:
+            raise ValueError(
+                f"Destination database for MIND entry type '{destination_type}' matches NOTION_TASKS_DB_ID. "
+                "Mind entries must NOT be written to the tasks database."
+            )
+
+        schema = self._get_db_properties_schema(target_db_id)
+
+        # 1. Determine Title property key
+        title_key = "Name"
+        for k, v in schema.items():
+            if v == "title":
+                title_key = k
+                break
+        else:
+            for candidate in ["Title", "Name", "Topic", "Log", "Entry"]:
+                if candidate in schema:
+                    title_key = candidate
+                    break
+
+        properties: Dict[str, Any] = {
+            title_key: {
+                "title": [
+                    {"text": {"content": title or "Untitled"}}
+                ]
+            }
+        }
+
+        # 2. Destination-specific properties
+        if destination_type == "DRAFT_SUBSTACK":
+            # Set Status to "Idea"
+            if "Status" in schema:
+                status_type = schema.get("Status")
+                if status_type == "select":
+                    properties["Status"] = {"select": {"name": "Idea"}}
+                else:
+                    properties["Status"] = {"status": {"name": "Idea"}}
+            else:
+                properties["Status"] = {"status": {"name": "Idea"}}
+
+        elif destination_type == "DAILY_LOG":
+            # Set Date property to today's date (YYYY-MM-DD)
+            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            date_key = "Date"
+            for k, v in schema.items():
+                if v == "date":
+                    date_key = k
+                    break
+            else:
+                for candidate in ["Date", "Log Date", "Created Date", "Date of Log", "Due date", "Due Date"]:
+                    if candidate in schema:
+                        date_key = candidate
+                        break
+            properties[date_key] = {"date": {"start": today_str}}
+
+        # Optional tags if schema supports multi_select or select
+        if tags:
+            for tag_candidate in ["Tags", "Tag", "Category", "Topics"]:
+                if tag_candidate in schema:
+                    prop_type = schema[tag_candidate]
+                    if prop_type == "multi_select":
+                        properties[tag_candidate] = {"multi_select": [{"name": t} for t in tags]}
+                    elif prop_type == "select":
+                        properties[tag_candidate] = {"select": {"name": tags[0]}}
+                    break
+
+        # 3. Construct child blocks (1st block = core thesis, following = full text)
+        thesis = core_thesis
+        if not thesis and content:
+            thesis = content.strip().split(".")[0].strip()
+            if thesis:
+                thesis += "."
+
+        children_blocks = self._build_mind_blocks(thesis, content)
+
+        return self._request_with_retry(
+            self.client.pages.create,
+            parent={"database_id": target_db_id},
+            properties=properties,
+            children=children_blocks,
+        )
 
     def create_task(
         self,

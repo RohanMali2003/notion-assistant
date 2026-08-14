@@ -102,9 +102,10 @@ def test_parse_mind_stage2_success(mock_genai_cls):
     mock_client = MagicMock()
     mock_resp = MagicMock()
     mock_resp.parsed = MindEntry(
-        entry_type="SUBSTACK_DRAFT",
+        entry_type="DRAFT_SUBSTACK",
         title="Simplicity in Software",
-        content="Draft body here...",
+        core_thesis="Simple systems reduce cognitive load and failure domains.",
+        content="Draft body here explaining simplicity principles...",
         summary="A draft on simplicity",
         tags=["Substack", "Tech"],
     )
@@ -112,9 +113,11 @@ def test_parse_mind_stage2_success(mock_genai_cls):
     mock_genai_cls.return_value = mock_client
 
     res = parse_mind_stage2("Drafting an essay on software simplicity")
-    assert res.entry_type == "SUBSTACK_DRAFT"
+    assert res.entry_type == "DRAFT_SUBSTACK"
+    assert res.sub_intent == "DRAFT_SUBSTACK"
     assert res.title == "Simplicity in Software"
-    assert res.content == "Draft body here..."
+    assert res.core_thesis == "Simple systems reduce cognitive load and failure domains."
+    assert res.content == "Draft body here explaining simplicity principles..."
     assert res.tags == ["Substack", "Tech"]
 
 
@@ -124,9 +127,11 @@ def test_parse_mind_stage2_error_fallback(mock_genai_cls):
     mock_client.models.generate_content.side_effect = Exception("Mind stage 2 error")
     mock_genai_cls.return_value = mock_client
 
-    res = parse_mind_stage2("My evening thoughts...")
+    res = parse_mind_stage2("My evening thoughts on architecture. More details follow.")
     assert res.entry_type == "DAILY_LOG"
-    assert res.content == "My evening thoughts..."
+    assert res.sub_intent == "DAILY_LOG"
+    assert res.content == "My evening thoughts on architecture. More details follow."
+    assert "My evening thoughts" in res.core_thesis
 
 
 @patch("app.main.genai.Client")
@@ -490,22 +495,27 @@ def test_webhook_query_pending(mock_genai_cls, mock_notion_cls, mock_tg_cls, env
 
 
 @patch("app.main.TelegramAssistantClient")
+@patch("app.main.NotionAssistantClient")
 @patch("app.main.genai.Client")
-def test_webhook_mind_module(mock_genai_cls, mock_tg_cls, env_setup):
+def test_webhook_mind_module_substack(mock_genai_cls, mock_notion_cls, mock_tg_cls, env_setup):
     mock_genai_inst = MagicMock()
     stage1_resp = MagicMock()
     stage1_resp.parsed = ModuleClassification(module="MIND", raw_text="Idea for new Substack post about AI tools")
 
     stage2_resp = MagicMock()
     stage2_resp.parsed = MindEntry(
-        entry_type="SUBSTACK_DRAFT",
+        entry_type="DRAFT_SUBSTACK",
         title="AI Tools in 2026",
+        core_thesis="Modern AI tools transform workflow efficiency when chained properly.",
         content="Full draft content here...",
         summary="A review of modern AI tools.",
         tags=["Substack", "AI"],
     )
     mock_genai_inst.models.generate_content.side_effect = [stage1_resp, stage2_resp]
     mock_genai_cls.return_value = mock_genai_inst
+
+    mock_notion_inst = MagicMock()
+    mock_notion_cls.return_value = mock_notion_inst
 
     mock_tg_inst = MagicMock()
     mock_tg_cls.return_value = mock_tg_inst
@@ -528,10 +538,129 @@ def test_webhook_mind_module(mock_genai_cls, mock_tg_cls, env_setup):
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
+    mock_notion_inst.create_mind_entry.assert_called_once_with(
+        entry_type="DRAFT_SUBSTACK",
+        title="AI Tools in 2026",
+        content="Full draft content here...",
+        core_thesis="Modern AI tools transform workflow efficiency when chained properly.",
+        tags=["Substack", "AI"],
+    )
     mock_tg_inst.send_message.assert_called_once()
     sent_text = mock_tg_inst.send_message.call_args[1]["text"]
-    assert "Mind Entry (SUBSTACK_DRAFT)" in sent_text
+    assert "Substack Draft Created (Idea)" in sent_text
     assert "AI Tools in 2026" in sent_text
+    assert "Modern AI tools transform" in sent_text
+
+
+@patch("app.main.TelegramAssistantClient")
+@patch("app.main.NotionAssistantClient")
+@patch("app.main.genai.Client")
+def test_webhook_mind_module_rambling(mock_genai_cls, mock_notion_cls, mock_tg_cls, env_setup):
+    mock_genai_inst = MagicMock()
+    stage1_resp = MagicMock()
+    stage1_resp.parsed = ModuleClassification(module="MIND", raw_text="Random thoughts on distributed cache invalidation")
+
+    stage2_resp = MagicMock()
+    stage2_resp.parsed = MindEntry(
+        entry_type="RAMBLING",
+        title="Cache Invalidation Musings",
+        core_thesis="Lease-based cache expiration prevents stale reads.",
+        content="Random thoughts on distributed cache invalidation...",
+        tags=["Cache", "Systems"],
+    )
+    mock_genai_inst.models.generate_content.side_effect = [stage1_resp, stage2_resp]
+    mock_genai_cls.return_value = mock_genai_inst
+
+    mock_notion_inst = MagicMock()
+    mock_notion_cls.return_value = mock_notion_inst
+
+    mock_tg_inst = MagicMock()
+    mock_tg_cls.return_value = mock_tg_inst
+
+    from app.main import app
+    client = TestClient(app)
+    payload = {
+        "update_id": 81,
+        "message": {
+            "message_id": 171,
+            "text": "Random thoughts on distributed cache invalidation",
+            "chat": {"id": 4444}
+        }
+    }
+    response = client.post(
+        "/webhook/telegram",
+        json=payload,
+        headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+    mock_notion_inst.create_mind_entry.assert_called_once_with(
+        entry_type="RAMBLING",
+        title="Cache Invalidation Musings",
+        content="Random thoughts on distributed cache invalidation...",
+        core_thesis="Lease-based cache expiration prevents stale reads.",
+        tags=["Cache", "Systems"],
+    )
+    mock_tg_inst.send_message.assert_called_once()
+    sent_text = mock_tg_inst.send_message.call_args[1]["text"]
+    assert "Rambling Recorded" in sent_text
+    assert "Cache Invalidation Musings" in sent_text
+
+
+@patch("app.main.TelegramAssistantClient")
+@patch("app.main.NotionAssistantClient")
+@patch("app.main.genai.Client")
+def test_webhook_mind_module_daily_log(mock_genai_cls, mock_notion_cls, mock_tg_cls, env_setup):
+    mock_genai_inst = MagicMock()
+    stage1_resp = MagicMock()
+    stage1_resp.parsed = ModuleClassification(module="MIND", raw_text="Daily wrap-up: finished sprint goals")
+
+    stage2_resp = MagicMock()
+    stage2_resp.parsed = MindEntry(
+        entry_type="DAILY_LOG",
+        title="Daily Wrap-Up",
+        core_thesis="Sprint goals successfully completed on schedule.",
+        content="Daily wrap-up: finished sprint goals...",
+    )
+    mock_genai_inst.models.generate_content.side_effect = [stage1_resp, stage2_resp]
+    mock_genai_cls.return_value = mock_genai_inst
+
+    mock_notion_inst = MagicMock()
+    mock_notion_cls.return_value = mock_notion_inst
+
+    mock_tg_inst = MagicMock()
+    mock_tg_cls.return_value = mock_tg_inst
+
+    from app.main import app
+    client = TestClient(app)
+    payload = {
+        "update_id": 82,
+        "message": {
+            "message_id": 172,
+            "text": "Daily wrap-up: finished sprint goals",
+            "chat": {"id": 4444}
+        }
+    }
+    response = client.post(
+        "/webhook/telegram",
+        json=payload,
+        headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+    mock_notion_inst.create_mind_entry.assert_called_once_with(
+        entry_type="DAILY_LOG",
+        title="Daily Wrap-Up",
+        content="Daily wrap-up: finished sprint goals...",
+        core_thesis="Sprint goals successfully completed on schedule.",
+        tags=[],
+    )
+    mock_tg_inst.send_message.assert_called_once()
+    sent_text = mock_tg_inst.send_message.call_args[1]["text"]
+    assert "Daily Log Recorded" in sent_text
+    assert "Daily Wrap-Up" in sent_text
 
 
 @patch("app.main.TelegramAssistantClient")
