@@ -39,6 +39,8 @@ class Settings:
     NOTION_SUBSTACK_ID: str = os.getenv("NOTION_SUBSTACK_ID", "")
     NOTION_RAMBLINGS_ID: str = os.getenv("NOTION_RAMBLINGS_ID", "")
     NOTION_DAILY_LOGS_ID: str = os.getenv("NOTION_DAILY_LOGS_ID", "")
+    NOTION_SUBJECTS_DB_ID: str = os.getenv("NOTION_SUBJECTS_DB_ID", "")
+    NOTION_RESOURCES_DB_ID: str = os.getenv("NOTION_RESOURCES_DB_ID", "")
     APP_ENV: str = os.getenv("APP_ENV", "production")
     PORT: int = int(os.getenv("PORT", "8000"))
     WEBHOOK_SECRET: str = os.getenv("WEBHOOK_SECRET", "")
@@ -46,6 +48,7 @@ class Settings:
     WHATSAPP_VERIFY_TOKEN: str = os.getenv("WHATSAPP_VERIFY_TOKEN", "")
     WHATSAPP_TOKEN: str = os.getenv("WHATSAPP_TOKEN", "")
     WHATSAPP_PHONE_NUMBER_ID: str = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+    WHATSAPP_API_URL: str = os.getenv("WHATSAPP_API_URL", "https://graph.facebook.com/v20.0")
 
 
 settings = Settings()

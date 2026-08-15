@@ -663,9 +663,10 @@ def test_webhook_mind_module_daily_log(mock_genai_cls, mock_notion_cls, mock_tg_
     assert "Daily Wrap-Up" in sent_text
 
 
+@patch("app.main.execute_learning_background_pipeline")
 @patch("app.main.TelegramAssistantClient")
 @patch("app.main.genai.Client")
-def test_webhook_learning_module(mock_genai_cls, mock_tg_cls, env_setup):
+def test_webhook_learning_module(mock_genai_cls, mock_tg_cls, mock_bg_task, env_setup):
     mock_genai_inst = MagicMock()
     stage1_resp = MagicMock()
     stage1_resp.parsed = ModuleClassification(module="LEARNING", raw_text="I want to study Distributed Consensus")
@@ -701,10 +702,135 @@ def test_webhook_learning_module(mock_genai_cls, mock_tg_cls, env_setup):
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
+    # Immediate acknowledgement sent to Telegram
     mock_tg_inst.send_message.assert_called_once()
     sent_text = mock_tg_inst.send_message.call_args[1]["text"]
-    assert "Learning Topic Added" in sent_text
-    assert "Distributed Consensus" in sent_text
+    assert "Building your study plan..." in sent_text
+
+    # Background task enqueued
+    mock_bg_task.assert_called_once()
+
+
+@patch("app.main.execute_learning_background_pipeline")
+@patch("app.main.WhatsAppAssistantClient")
+@patch("app.main.genai.Client")
+def test_whatsapp_webhook_learning_module(mock_genai_cls, mock_wa_cls, mock_bg_task, env_setup):
+    mock_genai_inst = MagicMock()
+    stage1_resp = MagicMock()
+    stage1_resp.parsed = ModuleClassification(module="LEARNING", raw_text="I want to study Rust")
+
+    stage2_resp = MagicMock()
+    stage2_resp.parsed = LearningRequest(
+        topic="Rust Programming",
+        category="Computer Science",
+        proficiency_level="Beginner",
+    )
+    mock_genai_inst.models.generate_content.side_effect = [stage1_resp, stage2_resp]
+    mock_genai_cls.return_value = mock_genai_inst
+
+    mock_wa_inst = MagicMock()
+    mock_wa_cls.return_value = mock_wa_inst
+
+    from app.main import app
+    client = TestClient(app)
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "111",
+                "changes": [
+                    {
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "messages": [
+                                {
+                                    "from": "1234567890",
+                                    "id": "wamid.test",
+                                    "text": {"body": "I want to study Rust"},
+                                    "type": "text",
+                                }
+                            ]
+                        },
+                        "field": "messages",
+                    }
+                ],
+            }
+        ],
+    }
+    response = client.post("/webhook", json=payload)
+    assert response.status_code == 200
+    assert response.text == "EVENT_RECEIVED"
+
+    # Immediate acknowledgement sent to WhatsApp
+    mock_wa_inst.send_message.assert_called_once_with(
+        to="1234567890",
+        text="Building your study plan...",
+    )
+
+    # Background task enqueued
+    mock_bg_task.assert_called_once()
+
+
+@patch("app.main.WhatsAppAssistantClient")
+@patch("app.main.NotionAssistantClient")
+@patch("app.main.genai.Client")
+def test_whatsapp_webhook_tasks_module(mock_genai_cls, mock_notion_cls, mock_wa_cls, env_setup):
+    mock_genai_inst = MagicMock()
+    stage1_resp = MagicMock()
+    stage1_resp.parsed = ModuleClassification(module="TASKS", raw_text="Submit report tomorrow")
+
+    stage2_resp = MagicMock()
+    stage2_resp.parsed = TaskAnalysis(
+        intent="CREATE_TASK",
+        title="Submit report",
+        due_date="2026-08-16",
+        priority="High",
+    )
+    mock_genai_inst.models.generate_content.side_effect = [stage1_resp, stage2_resp]
+    mock_genai_cls.return_value = mock_genai_inst
+
+    mock_notion_inst = MagicMock()
+    mock_notion_cls.return_value = mock_notion_inst
+
+    mock_wa_inst = MagicMock()
+    mock_wa_cls.return_value = mock_wa_inst
+
+    from app.main import app
+    client = TestClient(app)
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "111",
+                "changes": [
+                    {
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "messages": [
+                                {
+                                    "from": "9876543210",
+                                    "id": "wamid.task",
+                                    "text": {"body": "Submit report tomorrow"},
+                                    "type": "text",
+                                }
+                            ]
+                        },
+                        "field": "messages",
+                    }
+                ],
+            }
+        ],
+    }
+    response = client.post("/webhook", json=payload)
+    assert response.status_code == 200
+    assert response.text == "EVENT_RECEIVED"
+
+    mock_notion_inst.create_task.assert_called_once()
+    mock_wa_inst.send_message.assert_called_once()
+    sent_text = mock_wa_inst.send_message.call_args[1]["text"]
+    assert "Task created" in sent_text
+    assert "Submit report" in sent_text
+
 
 
 @patch("app.main.TelegramAssistantClient")

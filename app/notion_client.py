@@ -11,7 +11,7 @@ except ImportError:
     Client = None
     APIResponseError = None
 
-from app.schemas import ReminderItem
+from app.schemas import LEARNING_TAG, ReminderItem
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,8 @@ class NotionAssistantClient:
         substack_db_id: Optional[str] = None,
         ramblings_db_id: Optional[str] = None,
         daily_logs_db_id: Optional[str] = None,
+        subjects_db_id: Optional[str] = None,
+        resources_db_id: Optional[str] = None,
     ):
         from app.config import settings
 
@@ -80,6 +82,16 @@ class NotionAssistantClient:
             self.daily_logs_db_id = daily_logs_db_id
         else:
             self.daily_logs_db_id = getattr(settings, "NOTION_DAILY_LOGS_ID", None) or os.getenv("NOTION_DAILY_LOGS_ID", "")
+
+        if subjects_db_id is not None:
+            self.subjects_db_id = subjects_db_id
+        else:
+            self.subjects_db_id = getattr(settings, "NOTION_SUBJECTS_DB_ID", None) or os.getenv("NOTION_SUBJECTS_DB_ID", "")
+
+        if resources_db_id is not None:
+            self.resources_db_id = resources_db_id
+        else:
+            self.resources_db_id = getattr(settings, "NOTION_RESOURCES_DB_ID", None) or os.getenv("NOTION_RESOURCES_DB_ID", "")
 
         self._db_props_cache: Dict[str, Dict[str, str]] = {}
 
@@ -673,4 +685,210 @@ class NotionAssistantClient:
             properties=update_props,
         )
         return (True, matched_title, updated_page)
+
+    def create_subject_page(
+        self,
+        title: str,
+        curriculum_topics: List[str],
+    ) -> Dict[str, Any]:
+        """Creates the Subject page in NOTION_SUBJECTS_DB_ID with Subject title and
+
+        a children array of numbered_list_item blocks for the curriculum.
+        Leaves Completed tasks and % Completed untouched as read-only rollups.
+        """
+        target_db_id = self.subjects_db_id
+        if not target_db_id:
+            raise ValueError("NOTION_SUBJECTS_DB_ID is not configured.")
+
+        schema = self._get_db_properties_schema(target_db_id)
+
+        # Determine title property key (e.g. 'Subject', 'Name', 'Title')
+        title_key = "Subject"
+        if "Subject" in schema:
+            title_key = "Subject"
+        else:
+            for k, v in schema.items():
+                if v == "title":
+                    title_key = k
+                    break
+
+        properties: Dict[str, Any] = {
+            title_key: {
+                "title": [
+                    {"text": {"content": title}}
+                ]
+            }
+        }
+
+        # Build children array of numbered_list_item blocks directly in payload
+        children_blocks: List[Dict[str, Any]] = []
+        for topic in curriculum_topics:
+            topic_str = topic.strip()
+            if not topic_str:
+                continue
+            children_blocks.append({
+                "object": "block",
+                "type": "numbered_list_item",
+                "numbered_list_item": {
+                    "rich_text": [
+                        {
+                            "type": "text",
+                            "text": {"content": topic_str}
+                        }
+                    ]
+                }
+            })
+
+        return self._request_with_retry(
+            self.client.pages.create,
+            parent={"database_id": target_db_id},
+            properties=properties,
+            children=children_blocks,
+        )
+
+    def create_resource_row(
+        self,
+        name: str,
+        url: str,
+        resource_type: str,
+        subject_page_id: str,
+    ) -> Dict[str, Any]:
+        """Creates a row in NOTION_RESOURCES_DB_ID: Resource Name (title),
+
+        Type (select), URL, and Subjects (relation to Subject page ID).
+        """
+        target_db_id = self.resources_db_id
+        if not target_db_id:
+            raise ValueError("NOTION_RESOURCES_DB_ID is not configured.")
+
+        schema = self._get_db_properties_schema(target_db_id)
+
+        title_key = "Resource Name"
+        if "Resource Name" in schema:
+            title_key = "Resource Name"
+        elif "Name" in schema:
+            title_key = "Name"
+        elif "Title" in schema:
+            title_key = "Title"
+        else:
+            for k, v in schema.items():
+                if v == "title":
+                    title_key = k
+                    break
+
+        rel_key = "Subjects"
+        if "Subjects" in schema:
+            rel_key = "Subjects"
+        elif "Subject" in schema:
+            rel_key = "Subject"
+
+        type_key = "Type" if (not schema or "Type" in schema) else "Resource Type"
+
+        properties: Dict[str, Any] = {
+            title_key: {
+                "title": [
+                    {"text": {"content": name or url}}
+                ]
+            },
+            type_key: {
+                "select": {
+                    "name": resource_type
+                }
+            },
+            "URL": {
+                "url": url
+            },
+            rel_key: {
+                "relation": [
+                    {"id": subject_page_id}
+                ]
+            }
+        }
+
+        return self._request_with_retry(
+            self.client.pages.create,
+            parent={"database_id": target_db_id},
+            properties=properties,
+        )
+
+    def create_starter_task(
+        self,
+        title: str,
+        subject_page_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Creates a starter task in NOTION_TASKS_DB_ID with Tags=['Learning']
+
+        and links it back to the Subject relation property.
+        """
+        schema = self._get_db_properties_schema(self.tasks_db_id)
+
+        title_key = "Name"
+        if "Task name" in schema:
+            title_key = "Task name"
+        elif "Title" in schema:
+            title_key = "Title"
+        elif "Name" in schema:
+            title_key = "Name"
+        else:
+            for k, v in schema.items():
+                if v == "title":
+                    title_key = k
+                    break
+
+        properties: Dict[str, Any] = {
+            title_key: {
+                "title": [
+                    {"text": {"content": title}}
+                ]
+            },
+            "Status": {
+                "status": {
+                    "name": "Not started"
+                }
+            }
+        }
+
+        if "Tags" in schema:
+            tag_type = schema.get("Tags")
+            if tag_type == "multi_select":
+                properties["Tags"] = {"multi_select": [{"name": LEARNING_TAG}]}
+            else:
+                properties["Tags"] = {"select": {"name": LEARNING_TAG}}
+        elif "Tag" in schema:
+            tag_type = schema.get("Tag")
+            if tag_type == "multi_select":
+                properties["Tag"] = {"multi_select": [{"name": LEARNING_TAG}]}
+            else:
+                properties["Tag"] = {"select": {"name": LEARNING_TAG}}
+        else:
+            properties["Tags"] = {"multi_select": [{"name": LEARNING_TAG}]}
+
+        if subject_page_id:
+            for rel_candidate in ["Subject", "Subjects", "Course", "Topic"]:
+                if rel_candidate in schema:
+                    properties[rel_candidate] = {"relation": [{"id": subject_page_id}]}
+                    break
+
+        created_task = self._request_with_retry(
+            self.client.pages.create,
+            parent={"database_id": self.tasks_db_id},
+            properties=properties,
+        )
+
+        # Also link back via Subject Tasks relation if configured on Subject page
+        if subject_page_id and self.subjects_db_id:
+            try:
+                subj_schema = self._get_db_properties_schema(self.subjects_db_id)
+                if "Tasks" in subj_schema:
+                    task_id = created_task.get("id")
+                    if task_id:
+                        self._request_with_retry(
+                            self.client.pages.update,
+                            page_id=subject_page_id,
+                            properties={"Tasks": {"relation": [{"id": task_id}]}}
+                        )
+            except Exception as subj_err:
+                logger.debug("Could not link task back to Subject page: %s", subj_err)
+
+        return created_task
 

@@ -1,7 +1,7 @@
 import logging
 import os
 from typing import Any, Dict, Optional, Tuple, Union
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 from starlette.concurrency import run_in_threadpool
 try:
@@ -12,6 +12,7 @@ except ImportError:
     types = None
 
 from app.config import settings
+from app.learning_service import execute_learning_background_pipeline
 from app.notion_client import NotionAssistantClient
 from app.schemas import (
     LearningRequest,
@@ -23,6 +24,7 @@ from app.schemas import (
     WebhookResponse,
 )
 from app.telegram_client import TelegramAssistantClient
+from app.whatsapp_client import WhatsAppAssistantClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app.main")
@@ -335,15 +337,213 @@ def whatsapp_webhook_handshake(
     raise HTTPException(status_code=403, detail="Verification token mismatch")
 
 
+def _extract_whatsapp_message(payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    """Extract sender phone and text from WhatsApp Cloud API webhook payload."""
+    try:
+        entries = payload.get("entry", [])
+        for entry in entries:
+            changes = entry.get("changes", [])
+            for change in changes:
+                value = change.get("value", {})
+                messages = value.get("messages", [])
+                for msg in messages:
+                    sender = msg.get("from")
+                    msg_type = msg.get("type", "text")
+                    if msg_type == "text":
+                        text = msg.get("text", {}).get("body", "")
+                        if text and sender:
+                            return str(sender), text
+                    elif "text" in msg:
+                        text = msg.get("text", {}).get("body", "") or str(msg.get("text"))
+                        if text and sender:
+                            return str(sender), text
+    except Exception as exc:
+        logger.debug("Error extracting WhatsApp message: %s", exc)
+    return None, None
+
+
+async def _handle_module_action(
+    module: str,
+    parsed_result: Any,
+    text: str,
+    notion_client: NotionAssistantClient,
+) -> str:
+    """Execute standard synchronous actions for TASKS, MIND, and LEETCODE modules."""
+    if module == "TASKS":
+        parsed_task: TaskAnalysis = parsed_result
+        intent = parsed_task.intent
+
+        if intent == "CREATE_TASK":
+            await run_in_threadpool(
+                notion_client.create_task,
+                title=parsed_task.title or text,
+                priority=parsed_task.priority,
+                tag=parsed_task.tag,
+                due_date=parsed_task.due_date,
+                description=parsed_task.description,
+            )
+            reply_text = f"✅ Task created: *{parsed_task.title or text}*"
+            if parsed_task.due_date:
+                reply_text += f"\n📅 Due: {parsed_task.due_date}"
+            if parsed_task.priority:
+                reply_text += f"\n⚡ Priority: {parsed_task.priority}"
+            if parsed_task.tag:
+                reply_text += f"\n🏷 Tag: {parsed_task.tag}"
+            return reply_text
+
+        elif intent == "UPDATE_TASK":
+            target_status = parsed_task.target_status or "In progress"
+            title_query = parsed_task.title or text
+            success, matched_title, _ = await run_in_threadpool(
+                notion_client.update_task_status,
+                title_query=title_query,
+                status_name=target_status,
+                new_due_date=parsed_task.new_due_date or parsed_task.due_date,
+            )
+            if success:
+                reply_text = f"✅ Updated *{matched_title}*\n🔄 Status: *{target_status}*"
+                if parsed_task.new_due_date or parsed_task.due_date:
+                    reply_text += f"\n📅 Due: {parsed_task.new_due_date or parsed_task.due_date}"
+            else:
+                reply_text = f"⚠️ Could not find an active task matching: *{title_query}*"
+            return reply_text
+
+        elif intent == "QUERY_TODAY":
+            today_items = await run_in_threadpool(notion_client.get_today_tasks)
+            if today_items:
+                tasks_str = "\n".join(
+                    [f"• {item.title}" + (f" (Due: {item.due_date})" if item.due_date else "") for item in today_items]
+                )
+                return f"📅 *Today's Tasks ({len(today_items)}):*\n{tasks_str}"
+            else:
+                return "🎉 No tasks due today!"
+
+        elif intent == "QUERY_PENDING":
+            pending_items = await run_in_threadpool(notion_client.get_pending, limit=5)
+            if pending_items:
+                tasks_str = "\n".join(
+                    [f"• {item.title}" + (f" (Due: {item.due_date})" if item.due_date else "") for item in pending_items]
+                )
+                return f"📋 *Pending Tasks ({len(pending_items)}):*\n{tasks_str}"
+            else:
+                return "🎉 No pending tasks found!"
+
+        else:  # DAILY_LOG or fallback
+            log_content = parsed_task.log_content or text
+            return f"📝 *Daily Log Recorded:*\n{log_content}"
+
+    elif module == "MIND":
+        mind_entry: MindEntry = parsed_result
+        entry_title = mind_entry.title or (text[:50] if text else "Untitled Entry")
+        entry_content = mind_entry.content or text
+        entry_sub_intent = mind_entry.sub_intent or "DAILY_LOG"
+
+        await run_in_threadpool(
+            notion_client.create_mind_entry,
+            entry_type=entry_sub_intent,
+            title=entry_title,
+            content=entry_content,
+            core_thesis=mind_entry.core_thesis,
+            tags=mind_entry.tags,
+        )
+
+        if entry_sub_intent == "DRAFT_SUBSTACK":
+            reply_text = f"✍️ *Substack Draft Created (Idea):* *{entry_title}*"
+        elif entry_sub_intent == "RAMBLING":
+            reply_text = f"💭 *Rambling Recorded:* *{entry_title}*"
+        else:
+            reply_text = f"📝 *Daily Log Recorded:* *{entry_title}*"
+
+        if mind_entry.core_thesis:
+            reply_text += f"\n💡 *Core Thesis:* {mind_entry.core_thesis}"
+        elif mind_entry.summary:
+            reply_text += f"\n📌 *Summary:* {mind_entry.summary}"
+        if mind_entry.tags:
+            reply_text += f"\n🏷 Tags: {', '.join(mind_entry.tags)}"
+        return reply_text
+
+    elif module == "LEETCODE":
+        lc_req: LeetcodeReviewRequest = parsed_result
+        num_part = f"#{lc_req.problem_number} " if lc_req.problem_number else ""
+        reply_text = f"💻 *LeetCode Review Logged:* *{num_part}{lc_req.problem_name or text}*"
+        if lc_req.difficulty:
+            reply_text += f"\n⚡ Difficulty: {lc_req.difficulty}"
+        if lc_req.patterns:
+            reply_text += f"\n🧩 Patterns: {', '.join(lc_req.patterns)}"
+        if lc_req.status:
+            reply_text += f"\n📊 Status: {lc_req.status}"
+        if lc_req.review_notes:
+            reply_text += f"\n📝 Notes: {lc_req.review_notes}"
+        return reply_text
+
+    else:
+        return f"📝 *Recorded:*\n{text}"
+
+
 @app.post("/webhook")
-async def whatsapp_webhook():
-    """WhatsApp Cloud API webhook event endpoint returning EVENT_RECEIVED immediately."""
+async def whatsapp_webhook(
+    background_tasks: BackgroundTasks,
+    request: Request = None,
+):
+    """WhatsApp Cloud API webhook event endpoint."""
+    payload: Dict[str, Any] = {}
+    if request is not None:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+
+    sender_phone, text = _extract_whatsapp_message(payload)
+    if not sender_phone or not text:
+        logger.info("WhatsApp webhook received non-message or empty event.")
+        return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
+
+    # Two-Stage Gemini Classification & Parsing
+    module, parsed_result = await run_in_threadpool(analyze_user_text_two_stage, text)
+
+    whatsapp_client = WhatsAppAssistantClient()
+    notion_client = NotionAssistantClient()
+
+    if module == "LEARNING":
+        # 1. Immediately reply on WhatsApp with short acknowledgement
+        try:
+            await run_in_threadpool(
+                whatsapp_client.send_message,
+                to=sender_phone,
+                text="Building your study plan...",
+            )
+        except Exception as wa_err:
+            logger.error("Failed to send WhatsApp learning ack: %s", wa_err)
+
+        # 2. Add background task to compile curriculum and write to Notion
+        background_tasks.add_task(
+            execute_learning_background_pipeline,
+            parsed_result,
+            to_phone=sender_phone,
+        )
+
+        # Return 200 immediately to WhatsApp webhook
+        return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
+
+    # For other modules (TASKS, MIND, LEETCODE)
+    try:
+        reply_text = await _handle_module_action(module, parsed_result, text, notion_client)
+        if reply_text:
+            await run_in_threadpool(
+                whatsapp_client.send_message,
+                to=sender_phone,
+                text=reply_text,
+            )
+    except Exception as exc:
+        logger.error("Failed to process WhatsApp message: %s", exc)
+
     return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
 
 
 @app.post("/webhook/telegram")
 async def telegram_webhook(
     update: TelegramWebhookUpdate,
+    background_tasks: BackgroundTasks,
     x_telegram_bot_api_secret_token: Optional[str] = Header(None, alias="X-Telegram-Bot-Api-Secret-Token")
 ):
     """Receive and process incoming Telegram webhooks."""
@@ -372,128 +572,30 @@ async def telegram_webhook(
     notion_client = NotionAssistantClient()
     telegram_client = TelegramAssistantClient()
 
-    # 5. Route module and parsed result to appropriate action
-    try:
-        if module == "TASKS":
-            parsed_task: TaskAnalysis = parsed_result
-            intent = parsed_task.intent
-
-            if intent == "CREATE_TASK":
-                await run_in_threadpool(
-                    notion_client.create_task,
-                    title=parsed_task.title or text,
-                    priority=parsed_task.priority,
-                    tag=parsed_task.tag,
-                    due_date=parsed_task.due_date,
-                    description=parsed_task.description,
-                )
-                reply_text = f"✅ Task created: *{parsed_task.title or text}*"
-                if parsed_task.due_date:
-                    reply_text += f"\n📅 Due: {parsed_task.due_date}"
-                if parsed_task.priority:
-                    reply_text += f"\n⚡ Priority: {parsed_task.priority}"
-                if parsed_task.tag:
-                    reply_text += f"\n🏷 Tag: {parsed_task.tag}"
-
-            elif intent == "UPDATE_TASK":
-                target_status = parsed_task.target_status or "In progress"
-                title_query = parsed_task.title or text
-                success, matched_title, _ = await run_in_threadpool(
-                    notion_client.update_task_status,
-                    title_query=title_query,
-                    status_name=target_status,
-                    new_due_date=parsed_task.new_due_date or parsed_task.due_date,
-                )
-                if success:
-                    reply_text = f"✅ Updated *{matched_title}*\n🔄 Status: *{target_status}*"
-                    if parsed_task.new_due_date or parsed_task.due_date:
-                        reply_text += f"\n📅 Due: {parsed_task.new_due_date or parsed_task.due_date}"
-                else:
-                    reply_text = f"⚠️ Could not find an active task matching: *{title_query}*"
-
-            elif intent == "QUERY_TODAY":
-                today_items = await run_in_threadpool(notion_client.get_today_tasks)
-                if today_items:
-                    tasks_str = "\n".join(
-                        [f"• {item.title}" + (f" (Due: {item.due_date})" if item.due_date else "") for item in today_items]
-                    )
-                    reply_text = f"📅 *Today's Tasks ({len(today_items)}):*\n{tasks_str}"
-                else:
-                    reply_text = "🎉 No tasks due today!"
-
-            elif intent == "QUERY_PENDING":
-                pending_items = await run_in_threadpool(notion_client.get_pending, limit=5)
-                if pending_items:
-                    tasks_str = "\n".join(
-                        [f"• {item.title}" + (f" (Due: {item.due_date})" if item.due_date else "") for item in pending_items]
-                    )
-                    reply_text = f"📋 *Pending Tasks ({len(pending_items)}):*\n{tasks_str}"
-                else:
-                    reply_text = "🎉 No pending tasks found!"
-
-            else:  # DAILY_LOG or fallback
-                log_content = parsed_task.log_content or text
-                reply_text = f"📝 *Daily Log Recorded:*\n{log_content}"
-
-        elif module == "MIND":
-            mind_entry: MindEntry = parsed_result
-            entry_title = mind_entry.title or (text[:50] if text else "Untitled Entry")
-            entry_content = mind_entry.content or text
-            entry_sub_intent = mind_entry.sub_intent or "DAILY_LOG"
-
-            await run_in_threadpool(
-                notion_client.create_mind_entry,
-                entry_type=entry_sub_intent,
-                title=entry_title,
-                content=entry_content,
-                core_thesis=mind_entry.core_thesis,
-                tags=mind_entry.tags,
-            )
-
-            if entry_sub_intent == "DRAFT_SUBSTACK":
-                reply_text = f"✍️ *Substack Draft Created (Idea):* *{entry_title}*"
-            elif entry_sub_intent == "RAMBLING":
-                reply_text = f"💭 *Rambling Recorded:* *{entry_title}*"
-            else:
-                reply_text = f"📝 *Daily Log Recorded:* *{entry_title}*"
-
-            if mind_entry.core_thesis:
-                reply_text += f"\n💡 *Core Thesis:* {mind_entry.core_thesis}"
-            elif mind_entry.summary:
-                reply_text += f"\n📌 *Summary:* {mind_entry.summary}"
-            if mind_entry.tags:
-                reply_text += f"\n🏷 Tags: {', '.join(mind_entry.tags)}"
-
-        elif module == "LEARNING":
-            learning_req: LearningRequest = parsed_result
-            reply_text = f"📚 *Learning Topic Added:* *{learning_req.topic or text}*"
-            if learning_req.category:
-                reply_text += f"\n📂 Category: {learning_req.category}"
-            if learning_req.proficiency_level:
-                reply_text += f"\n🎯 Level: {learning_req.proficiency_level}"
-            if learning_req.goal:
-                reply_text += f"\n🎯 Goal: {learning_req.goal}"
-            if learning_req.resources_requested:
-                reply_text += f"\n📖 Resources: {learning_req.resources_requested}"
-
-        elif module == "LEETCODE":
-            lc_req: LeetcodeReviewRequest = parsed_result
-            num_part = f"#{lc_req.problem_number} " if lc_req.problem_number else ""
-            reply_text = f"💻 *LeetCode Review Logged:* *{num_part}{lc_req.problem_name or text}*"
-            if lc_req.difficulty:
-                reply_text += f"\n⚡ Difficulty: {lc_req.difficulty}"
-            if lc_req.patterns:
-                reply_text += f"\n🧩 Patterns: {', '.join(lc_req.patterns)}"
-            if lc_req.status:
-                reply_text += f"\n📊 Status: {lc_req.status}"
-            if lc_req.review_notes:
-                reply_text += f"\n📝 Notes: {lc_req.review_notes}"
-
-        else:
-            reply_text = f"📝 *Recorded:*\n{text}"
-
-        # 6. POST reply back to Telegram sendMessage endpoint via threadpool
+    # If module is LEARNING, acknowledge immediately and enqueue background task
+    if module == "LEARNING":
         if chat_id:
+            try:
+                await run_in_threadpool(
+                    telegram_client.send_message,
+                    text="Building your study plan...",
+                    chat_id=str(chat_id),
+                )
+            except Exception as tg_err:
+                logger.error("Failed to send Telegram learning ack: %s", tg_err)
+
+        background_tasks.add_task(
+            execute_learning_background_pipeline,
+            parsed_result,
+            chat_id=str(chat_id) if chat_id else None,
+        )
+        return {"status": "ok"}
+
+    # 5. Route other modules to appropriate synchronous action
+    try:
+        reply_text = await _handle_module_action(module, parsed_result, text, notion_client)
+
+        if chat_id and reply_text:
             try:
                 await run_in_threadpool(
                     telegram_client.send_message,
@@ -503,7 +605,7 @@ async def telegram_webhook(
             except Exception as tg_err:
                 logger.error("Failed to send message to Telegram chat_id=%s: %s", chat_id, tg_err)
 
-        # 7. Log request completion
+        # Log request completion
         logger.info(
             "Webhook request processed successfully: chat_id=%s, module=%s, status=success",
             chat_id,
@@ -520,4 +622,5 @@ async def telegram_webhook(
             exc,
         )
         return {"status": "error", "message": str(exc)}
+
 

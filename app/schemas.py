@@ -116,6 +116,50 @@ class LearningRequest(BaseModel):
     )
 
 
+# --- Learning Synthesis & Resource Schemas ---
+
+LearningTagLiteral = Literal["Learning"]
+LEARNING_TAG: LearningTagLiteral = "Learning"
+
+ResourceTypeLiteral = Literal["Article", "Video", "Docs", "Paper"]
+
+
+class VerifiedResource(BaseModel):
+    """Schema representing a link verified via live HTTP liveness check."""
+    name: str = Field(
+        default="",
+        description="Resource title or concise descriptive name."
+    )
+    url: str = Field(
+        ...,
+        description="Live, verified URL."
+    )
+    resource_type: ResourceTypeLiteral = Field(
+        default="Article",
+        description="Inferred resource type: Article, Video, Docs, or Paper."
+    )
+
+
+class LearningPlanSynthesis(BaseModel):
+    """Synthesized learning plan compiled via Gemini with web search grounding."""
+    subject_title: str = Field(
+        default="",
+        description="Subject title (e.g. Distributed Systems Fundamentals)."
+    )
+    curriculum_topics: List[str] = Field(
+        default_factory=list,
+        description="Flat continuous numbered list of novice-level topics without headers or groupings."
+    )
+    starter_tasks: List[str] = Field(
+        default_factory=list,
+        description="1-3 concrete, immediately actionable first steps to begin studying."
+    )
+    surfaced_resources: List[Dict[str, str]] = Field(
+        default_factory=list,
+        description="Surfaced resource links with url and title from grounding."
+    )
+
+
 class LeetcodeReviewRequest(BaseModel):
     """Structured output schema for LEETCODE module (problem review requests)."""
     problem_name: str = Field(

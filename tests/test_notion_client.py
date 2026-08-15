@@ -542,4 +542,137 @@ def test_build_mind_blocks_large_content_chunking():
     assert len(blocks[3]["paragraph"]["rich_text"][0]["text"]["content"]) == 500
 
 
+# --- Learning Module Notion Client Tests ---
+
+def test_create_subject_page_success():
+    """Test creating a Subject page in NOTION_SUBJECTS_DB_ID with numbered_list_item children."""
+    mock_client_inst = MagicMock()
+    mock_client_inst.databases.retrieve.return_value = {
+        "properties": {
+            "Subject": {"type": "title"},
+            "Completed tasks": {"type": "rollup"},
+            "% Completed": {"type": "rollup"},
+        }
+    }
+    mock_client_inst.pages.create.return_value = {
+        "id": "subj-123",
+        "url": "https://notion.so/subj-123",
+    }
+    mock_client_cls = MagicMock(return_value=mock_client_inst)
+
+    with patch("app.notion_client.Client", mock_client_cls):
+        from app.notion_client import NotionAssistantClient
+        client = NotionAssistantClient(
+            token="fake_token",
+            subjects_db_id="subjects_db_123",
+        )
+
+        res = client.create_subject_page(
+            title="Distributed Systems",
+            curriculum_topics=[
+                "1. Foundations of Consensus",
+                "2. Raft Protocol in Depth",
+            ],
+        )
+
+        assert res["id"] == "subj-123"
+        mock_client_inst.pages.create.assert_called_once()
+        create_kwargs = mock_client_inst.pages.create.call_args[1]
+
+        # Verify parent DB
+        assert create_kwargs["parent"] == {"database_id": "subjects_db_123"}
+
+        # Verify title
+        assert create_kwargs["properties"]["Subject"]["title"][0]["text"]["content"] == "Distributed Systems"
+
+        # Verify children are numbered_list_item blocks
+        children = create_kwargs["children"]
+        assert len(children) == 2
+        assert children[0]["type"] == "numbered_list_item"
+        assert children[0]["numbered_list_item"]["rich_text"][0]["text"]["content"] == "1. Foundations of Consensus"
+        assert children[1]["numbered_list_item"]["rich_text"][0]["text"]["content"] == "2. Raft Protocol in Depth"
+
+        # Verify rollups are not touched
+        assert "Completed tasks" not in create_kwargs["properties"]
+        assert "% Completed" not in create_kwargs["properties"]
+
+
+def test_create_resource_row_success():
+    """Test creating a Resource row in NOTION_RESOURCES_DB_ID with relation to Subject."""
+    mock_client_inst = MagicMock()
+    mock_client_inst.databases.retrieve.return_value = {
+        "properties": {
+            "Resource Name": {"type": "title"},
+            "Type": {"type": "select"},
+            "URL": {"type": "url"},
+            "Subjects": {"type": "relation"},
+        }
+    }
+    mock_client_inst.pages.create.return_value = {"id": "res-999"}
+    mock_client_cls = MagicMock(return_value=mock_client_inst)
+
+    with patch("app.notion_client.Client", mock_client_cls):
+        from app.notion_client import NotionAssistantClient
+        client = NotionAssistantClient(
+            token="fake_token",
+            resources_db_id="resources_db_123",
+        )
+
+        res = client.create_resource_row(
+            name="Raft Paper",
+            url="https://raft.github.io/raft.pdf",
+            resource_type="Paper",
+            subject_page_id="subj-123",
+        )
+
+        assert res["id"] == "res-999"
+        mock_client_inst.pages.create.assert_called_once()
+        create_kwargs = mock_client_inst.pages.create.call_args[1]
+        props = create_kwargs["properties"]
+
+        assert props["Resource Name"]["title"][0]["text"]["content"] == "Raft Paper"
+        assert props["Type"]["select"]["name"] == "Paper"
+        assert props["URL"]["url"] == "https://raft.github.io/raft.pdf"
+        assert props["Subjects"]["relation"][0]["id"] == "subj-123"
+
+
+def test_create_starter_task_with_learning_tag():
+    """Test creating a starter task with Tag='Learning' Literal."""
+    mock_client_inst = MagicMock()
+    mock_client_inst.databases.retrieve.return_value = {
+        "properties": {
+            "Task name": {"type": "title"},
+            "Status": {"type": "status"},
+            "Tags": {"type": "multi_select"},
+            "Subject": {"type": "relation"},
+        }
+    }
+    mock_client_inst.pages.create.return_value = {"id": "task-555"}
+    mock_client_cls = MagicMock(return_value=mock_client_inst)
+
+    with patch("app.notion_client.Client", mock_client_cls):
+        from app.notion_client import NotionAssistantClient
+        client = NotionAssistantClient(
+            token="fake_token",
+            tasks_db_id="tasks_db_123",
+            subjects_db_id="subjects_db_123",
+        )
+
+        res = client.create_starter_task(
+            title="Read Chapter 1",
+            subject_page_id="subj-123",
+        )
+
+        assert res["id"] == "task-555"
+        mock_client_inst.pages.create.assert_called_once()
+        create_kwargs = mock_client_inst.pages.create.call_args[1]
+        props = create_kwargs["properties"]
+
+        assert props["Task name"]["title"][0]["text"]["content"] == "Read Chapter 1"
+        assert props["Status"]["status"]["name"] == "Not started"
+        assert props["Tags"]["multi_select"][0]["name"] == "Learning"
+        assert props["Subject"]["relation"][0]["id"] == "subj-123"
+
+
+
 
