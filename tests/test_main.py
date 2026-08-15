@@ -833,9 +833,10 @@ def test_whatsapp_webhook_tasks_module(mock_genai_cls, mock_notion_cls, mock_wa_
 
 
 
+@patch("app.main.execute_leetcode_background_pipeline")
 @patch("app.main.TelegramAssistantClient")
 @patch("app.main.genai.Client")
-def test_webhook_leetcode_module(mock_genai_cls, mock_tg_cls, env_setup):
+def test_webhook_leetcode_module(mock_genai_cls, mock_tg_cls, mock_bg_task, env_setup):
     mock_genai_inst = MagicMock()
     stage1_resp = MagicMock()
     stage1_resp.parsed = ModuleClassification(module="LEETCODE", raw_text="Review LC 42 Trapping Rain Water")
@@ -873,10 +874,68 @@ def test_webhook_leetcode_module(mock_genai_cls, mock_tg_cls, env_setup):
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
-    mock_tg_inst.send_message.assert_called_once()
-    sent_text = mock_tg_inst.send_message.call_args[1]["text"]
-    assert "LeetCode Review Logged" in sent_text
-    assert "Trapping Rain Water" in sent_text
+    # Immediate ack sent to Telegram
+    mock_tg_inst.send_message.assert_called_once_with(
+        text="Pulling your latest solution...",
+        chat_id="2222",
+    )
+    # Background task enqueued
+    mock_bg_task.assert_called_once()
+
+
+@patch("app.main.execute_leetcode_background_pipeline")
+@patch("app.main.WhatsAppAssistantClient")
+@patch("app.main.genai.Client")
+def test_whatsapp_webhook_leetcode_module(mock_genai_cls, mock_wa_cls, mock_bg_task, env_setup):
+    mock_genai_inst = MagicMock()
+    stage1_resp = MagicMock()
+    stage1_resp.parsed = ModuleClassification(module="LEETCODE", raw_text="Review my Two Sum code")
+
+    stage2_resp = MagicMock()
+    stage2_resp.parsed = LeetcodeReviewRequest(problem_name="Two Sum")
+    mock_genai_inst.models.generate_content.side_effect = [stage1_resp, stage2_resp]
+    mock_genai_cls.return_value = mock_genai_inst
+
+    mock_wa_inst = MagicMock()
+    mock_wa_cls.return_value = mock_wa_inst
+
+    from app.main import app
+    client = TestClient(app)
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "111",
+                "changes": [
+                    {
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "messages": [
+                                {
+                                    "from": "1234567890",
+                                    "id": "wamid.lc",
+                                    "text": {"body": "Review my Two Sum code"},
+                                    "type": "text",
+                                }
+                            ]
+                        },
+                        "field": "messages",
+                    }
+                ],
+            }
+        ],
+    }
+    response = client.post("/webhook", json=payload)
+    assert response.status_code == 200
+    assert response.text == "EVENT_RECEIVED"
+
+    # Immediate ack sent to WhatsApp
+    mock_wa_inst.send_message.assert_called_once_with(
+        to="1234567890",
+        text="Pulling your latest solution...",
+    )
+    # Background task enqueued
+    mock_bg_task.assert_called_once()
 
 
 @patch("app.main.TelegramAssistantClient")

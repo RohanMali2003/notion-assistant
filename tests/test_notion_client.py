@@ -674,5 +674,71 @@ def test_create_starter_task_with_learning_tag():
         assert props["Subject"]["relation"][0]["id"] == "subj-123"
 
 
+def test_create_leetcode_log_row_success():
+    """Test creating a LeetCode problem review row in NOTION_LEETCODE_LOG_DB_ID."""
+    mock_client_inst = MagicMock()
+    mock_client_inst.databases.retrieve.return_value = {
+        "properties": {
+            "Problem": {"type": "title"},
+            "Difficulty": {"type": "select"},
+            "Verdict": {"type": "select"},
+            "Time Complexity": {"type": "rich_text"},
+            "Space Complexity": {"type": "rich_text"},
+            "Date": {"type": "date"},
+            "URL": {"type": "url"},
+            "Patterns": {"type": "multi_select"},
+        }
+    }
+    mock_client_inst.pages.create.return_value = {
+        "id": "lc-row-456",
+        "url": "https://notion.so/lc-row-456",
+    }
+    mock_client_cls = MagicMock(return_value=mock_client_inst)
+
+    with patch("app.notion_client.Client", mock_client_cls):
+        from app.notion_client import NotionAssistantClient
+        client = NotionAssistantClient(
+            token="fake_token",
+            leetcode_log_db_id="lc_db_123",
+        )
+
+        res = client.create_leetcode_log_row(
+            problem_title="Two Sum",
+            difficulty="Easy",
+            verdict="Correct",
+            time_complexity="O(N)",
+            space_complexity="O(N)",
+            is_optimal=True,
+            review_text="Optimal hash map approach.",
+            testing_questions=["What if nums contains duplicate elements?"],
+            code="def twoSum(nums, target): pass",
+            problem_url="https://leetcode.com/problems/two-sum/",
+            patterns=["Array", "Hash Table"],
+        )
+
+        assert res["id"] == "lc-row-456"
+        mock_client_inst.pages.create.assert_called_once()
+        create_kwargs = mock_client_inst.pages.create.call_args[1]
+        assert create_kwargs["parent"] == {"database_id": "lc_db_123"}
+        props = create_kwargs["properties"]
+
+        assert props["Problem"]["title"][0]["text"]["content"] == "Two Sum"
+        assert props["Difficulty"]["select"]["name"] == "Easy"
+        assert props["Verdict"]["select"]["name"] == "Correct"
+        assert props["Time Complexity"]["rich_text"][0]["text"]["content"] == "O(N)"
+        assert props["Space Complexity"]["rich_text"][0]["text"]["content"] == "O(N)"
+        assert props["URL"]["url"] == "https://leetcode.com/problems/two-sum/"
+        assert props["Patterns"]["multi_select"][0]["name"] == "Array"
+
+        # Verify child blocks
+        children = create_kwargs["children"]
+        assert len(children) >= 4
+        # 1st block is callout
+        assert children[0]["type"] == "callout"
+        # Includes code block
+        assert any(c["type"] == "code" for c in children)
+
+
+
 
 

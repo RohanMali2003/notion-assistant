@@ -13,6 +13,7 @@ except ImportError:
 
 from app.config import settings
 from app.learning_service import execute_learning_background_pipeline
+from app.leetcode_service import execute_leetcode_background_pipeline
 from app.notion_client import NotionAssistantClient
 from app.schemas import (
     LearningRequest,
@@ -525,7 +526,28 @@ async def whatsapp_webhook(
         # Return 200 immediately to WhatsApp webhook
         return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
 
-    # For other modules (TASKS, MIND, LEETCODE)
+    if module == "LEETCODE":
+        # 1. Immediately reply on WhatsApp with short acknowledgement
+        try:
+            await run_in_threadpool(
+                whatsapp_client.send_message,
+                to=sender_phone,
+                text="Pulling your latest solution...",
+            )
+        except Exception as wa_err:
+            logger.error("Failed to send WhatsApp leetcode ack: %s", wa_err)
+
+        # 2. Add background task to pull code, fetch constraints, review, write to Notion, and follow up
+        background_tasks.add_task(
+            execute_leetcode_background_pipeline,
+            parsed_result,
+            to_phone=sender_phone,
+        )
+
+        # Return 200 immediately to WhatsApp webhook
+        return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
+
+    # For other modules (TASKS, MIND)
     try:
         reply_text = await _handle_module_action(module, parsed_result, text, notion_client)
         if reply_text:
@@ -586,6 +608,25 @@ async def telegram_webhook(
 
         background_tasks.add_task(
             execute_learning_background_pipeline,
+            parsed_result,
+            chat_id=str(chat_id) if chat_id else None,
+        )
+        return {"status": "ok"}
+
+    # If module is LEETCODE, acknowledge immediately and enqueue background task
+    if module == "LEETCODE":
+        if chat_id:
+            try:
+                await run_in_threadpool(
+                    telegram_client.send_message,
+                    text="Pulling your latest solution...",
+                    chat_id=str(chat_id),
+                )
+            except Exception as tg_err:
+                logger.error("Failed to send Telegram leetcode ack: %s", tg_err)
+
+        background_tasks.add_task(
+            execute_leetcode_background_pipeline,
             parsed_result,
             chat_id=str(chat_id) if chat_id else None,
         )

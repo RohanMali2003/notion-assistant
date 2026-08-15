@@ -49,6 +49,7 @@ class NotionAssistantClient:
         daily_logs_db_id: Optional[str] = None,
         subjects_db_id: Optional[str] = None,
         resources_db_id: Optional[str] = None,
+        leetcode_log_db_id: Optional[str] = None,
     ):
         from app.config import settings
 
@@ -92,6 +93,15 @@ class NotionAssistantClient:
             self.resources_db_id = resources_db_id
         else:
             self.resources_db_id = getattr(settings, "NOTION_RESOURCES_DB_ID", None) or os.getenv("NOTION_RESOURCES_DB_ID", "")
+
+        if leetcode_log_db_id is not None:
+            self.leetcode_log_db_id = leetcode_log_db_id
+        else:
+            self.leetcode_log_db_id = (
+                getattr(settings, "NOTION_LEETCODE_LOG_DB_ID", None)
+                or os.getenv("NOTION_LEETCODE_LOG_DB_ID")
+                or os.getenv("NOTION_LEETCODE_DB_ID", "")
+            )
 
         self._db_props_cache: Dict[str, Dict[str, str]] = {}
 
@@ -891,4 +901,244 @@ class NotionAssistantClient:
                 logger.debug("Could not link task back to Subject page: %s", subj_err)
 
         return created_task
+
+    def _build_leetcode_blocks(
+        self,
+        verdict: Optional[str] = None,
+        time_complexity: Optional[str] = None,
+        space_complexity: Optional[str] = None,
+        is_optimal: bool = True,
+        review_text: str = "",
+        testing_questions: Optional[List[str]] = None,
+        code: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Constructs Notion child blocks for LeetCode problem review log."""
+        blocks: List[Dict[str, Any]] = []
+
+        def make_paragraph(text_content: str) -> Dict[str, Any]:
+            return {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [
+                        {"type": "text", "text": {"content": text_content[:2000]}}
+                    ]
+                }
+            }
+
+        def make_heading_2(text_content: str) -> Dict[str, Any]:
+            return {
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {
+                    "rich_text": [
+                        {"type": "text", "text": {"content": text_content[:2000]}}
+                    ]
+                }
+            }
+
+        def make_bullet_item(text_content: str) -> Dict[str, Any]:
+            return {
+                "object": "block",
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {
+                    "rich_text": [
+                        {"type": "text", "text": {"content": text_content[:2000]}}
+                    ]
+                }
+            }
+
+        # 1. Summary Callout Block
+        verdict_str = verdict or "Evaluated"
+        opt_str = "Optimal approach" if is_optimal else "Suboptimal approach"
+        summary_lines = [
+            f"Verdict: {verdict_str} ({opt_str})",
+            f"Time Complexity: {time_complexity or 'N/A'}",
+            f"Space Complexity: {space_complexity or 'N/A'}",
+        ]
+        callout_text = "\n".join(summary_lines)
+        blocks.append({
+            "object": "block",
+            "type": "callout",
+            "callout": {
+                "rich_text": [
+                    {"type": "text", "text": {"content": callout_text[:2000]}}
+                ],
+                "icon": {"emoji": "💻"}
+            }
+        })
+
+        # 2. Review Breakdown
+        if review_text and review_text.strip():
+            blocks.append(make_heading_2("Analysis & Complexity Review"))
+            for paragraph in review_text.strip().split("\n\n"):
+                clean_p = paragraph.strip()
+                if not clean_p:
+                    continue
+                for i in range(0, len(clean_p), 2000):
+                    blocks.append(make_paragraph(clean_p[i:i + 2000]))
+
+        # 3. Targeted Testing Questions
+        if testing_questions:
+            blocks.append(make_heading_2("Targeted Testing & Logic Questions"))
+            for q in testing_questions:
+                clean_q = q.strip().lstrip("•-*0123456789. ")
+                if clean_q:
+                    for i in range(0, len(clean_q), 2000):
+                        blocks.append(make_bullet_item(clean_q[i:i + 2000]))
+
+        # 4. Submitted Solution Code
+        if code and code.strip():
+            blocks.append(make_heading_2("Submitted Solution"))
+            clean_code = code.strip()
+            # Notion code blocks have 2000 character limit per rich_text element
+            code_text_chunks = [
+                {"type": "text", "text": {"content": clean_code[i:i + 2000]}}
+                for i in range(0, min(len(clean_code), 4000), 2000)
+            ]
+            blocks.append({
+                "object": "block",
+                "type": "code",
+                "code": {
+                    "rich_text": code_text_chunks,
+                    "language": "python"
+                }
+            })
+
+        return blocks
+
+    def create_leetcode_log_row(
+        self,
+        problem_title: str,
+        difficulty: Optional[str] = None,
+        verdict: Optional[str] = None,
+        time_complexity: Optional[str] = None,
+        space_complexity: Optional[str] = None,
+        is_optimal: bool = True,
+        review_text: str = "",
+        testing_questions: Optional[List[str]] = None,
+        code: Optional[str] = None,
+        problem_url: Optional[str] = None,
+        patterns: Optional[List[str]] = None,
+        database_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Creates a row in NOTION_LEETCODE_LOG_DB_ID for a LeetCode problem review."""
+        target_db_id = database_id or self.leetcode_log_db_id
+        if not target_db_id:
+            raise ValueError("NOTION_LEETCODE_LOG_DB_ID is not configured.")
+
+        schema = self._get_db_properties_schema(target_db_id)
+
+        # Title Property Key
+        title_key = "Problem"
+        if "Problem" in schema:
+            title_key = "Problem"
+        elif "Problem Name" in schema:
+            title_key = "Problem Name"
+        elif "Name" in schema:
+            title_key = "Name"
+        elif "Title" in schema:
+            title_key = "Title"
+        else:
+            for k, v in schema.items():
+                if v == "title":
+                    title_key = k
+                    break
+
+        properties: Dict[str, Any] = {
+            title_key: {
+                "title": [
+                    {"text": {"content": problem_title}}
+                ]
+            }
+        }
+
+        # Difficulty
+        if difficulty:
+            for diff_key in ["Difficulty", "difficulty"]:
+                if diff_key in schema:
+                    prop_type = schema[diff_key]
+                    if prop_type == "select":
+                        properties[diff_key] = {"select": {"name": difficulty}}
+                    elif prop_type == "rich_text":
+                        properties[diff_key] = {"rich_text": [{"text": {"content": difficulty}}]}
+                    break
+
+        # Verdict / Status
+        verdict_val = verdict or "Solved"
+        for verdict_key in ["Verdict", "Status", "Result"]:
+            if verdict_key in schema:
+                prop_type = schema[verdict_key]
+                if prop_type == "select":
+                    properties[verdict_key] = {"select": {"name": verdict_val}}
+                elif prop_type == "status":
+                    properties[verdict_key] = {"status": {"name": verdict_val}}
+                elif prop_type == "rich_text":
+                    properties[verdict_key] = {"rich_text": [{"text": {"content": verdict_val}}]}
+                break
+
+        # Time Complexity
+        if time_complexity:
+            for tc_key in ["Time Complexity", "Time complexity", "Time"]:
+                if tc_key in schema:
+                    prop_type = schema[tc_key]
+                    if prop_type == "rich_text":
+                        properties[tc_key] = {"rich_text": [{"text": {"content": time_complexity}}]}
+                    elif prop_type == "select":
+                        properties[tc_key] = {"select": {"name": time_complexity}}
+                    break
+
+        # Space Complexity
+        if space_complexity:
+            for sc_key in ["Space Complexity", "Space complexity", "Space"]:
+                if sc_key in schema:
+                    prop_type = schema[sc_key]
+                    if prop_type == "rich_text":
+                        properties[sc_key] = {"rich_text": [{"text": {"content": space_complexity}}]}
+                    elif prop_type == "select":
+                        properties[sc_key] = {"select": {"name": space_complexity}}
+                    break
+
+        # Date
+        for date_key in ["Date", "Review Date", "Created Date"]:
+            if date_key in schema and schema[date_key] == "date":
+                properties[date_key] = {"date": {"start": datetime.now(timezone.utc).strftime("%Y-%m-%d")}}
+                break
+
+        # URL
+        if problem_url:
+            for url_key in ["URL", "Link", "LeetCode URL"]:
+                if url_key in schema and schema[url_key] == "url":
+                    properties[url_key] = {"url": problem_url}
+                    break
+
+        # Patterns
+        if patterns:
+            for pat_key in ["Patterns", "Pattern", "Tags", "Tag"]:
+                if pat_key in schema:
+                    prop_type = schema[pat_key]
+                    if prop_type == "multi_select":
+                        properties[pat_key] = {"multi_select": [{"name": p} for p in patterns[:5]]}
+                    elif prop_type == "select":
+                        properties[pat_key] = {"select": {"name": patterns[0]}}
+                    break
+
+        # Build child blocks
+        children_blocks = self._build_leetcode_blocks(
+            verdict=verdict,
+            time_complexity=time_complexity,
+            space_complexity=space_complexity,
+            is_optimal=is_optimal,
+            review_text=review_text,
+            testing_questions=testing_questions,
+            code=code,
+        )
+
+        return self._request_with_retry(
+            self.client.pages.create,
+            parent={"database_id": target_db_id},
+            properties=properties,
+            children=children_blocks,
+        )
+
 
