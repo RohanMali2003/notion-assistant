@@ -33,3 +33,12 @@ jobs:
           APP_ENV: production
         run: |
           python cron/check_reminders.py
+
+      - name: Run LeetCode Cleanup Script
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY || secrets.NOTION_TOKEN }}
+          NOTION_TASKS_DB_ID: ${{ secrets.NOTION_TASKS_DB_ID || secrets.NOTION_DATABASE_ID }}
+          APP_ENV: production
+        run: |
+          python cron/cleanup_leetcode.py
+
