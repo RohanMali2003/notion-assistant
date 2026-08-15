@@ -350,3 +350,395 @@ def test_get_today_tasks():
         assert today_tasks[0]["title"] == "Today Task"
 
 
+# --- MIND Module Notion Client Tests ---
+
+def test_create_mind_entry_substack():
+    """Test create_mind_entry for DRAFT_SUBSTACK sets Status='Idea' and targets NOTION_SUBSTACK_ID."""
+    mock_client_inst = MagicMock()
+    mock_client_inst.databases.retrieve.return_value = {
+        "properties": {
+            "Title": {"type": "title"},
+            "Status": {"type": "status"},
+            "Tags": {"type": "multi_select"},
+        }
+    }
+    mock_client_cls = MagicMock(return_value=mock_client_inst)
+
+    with patch("app.notion_client.Client", mock_client_cls):
+        from app.notion_client import NotionAssistantClient
+        client = NotionAssistantClient(
+            token="fake_token",
+            tasks_db_id="tasks_db_123",
+            substack_db_id="substack_db_456",
+            ramblings_db_id="ramblings_db_789",
+            daily_logs_db_id="daily_logs_db_000",
+        )
+
+        res = client.create_mind_entry(
+            entry_type="DRAFT_SUBSTACK",
+            title="The Future of AI Coding",
+            content="Full essay text explaining agentic coding workflows.\nSecond paragraph on developer velocity.",
+            core_thesis="Agentic coding shifts the developer role from writing syntax to directing architectural intent.",
+            tags=["AI", "Substack"],
+        )
+
+        mock_client_inst.pages.create.assert_called_once()
+        call_kwargs = mock_client_inst.pages.create.call_args[1]
+        assert call_kwargs["parent"] == {"database_id": "substack_db_456"}
+
+        props = call_kwargs["properties"]
+        assert props["Title"] == {"title": [{"text": {"content": "The Future of AI Coding"}}]}
+        assert props["Status"] == {"status": {"name": "Idea"}}
+        assert props["Tags"] == {"multi_select": [{"name": "AI"}, {"name": "Substack"}]}
+
+        children = call_kwargs["children"]
+        assert len(children) >= 3
+        # First block is core thesis
+        assert children[0]["paragraph"]["rich_text"][0]["text"]["content"] == (
+            "Agentic coding shifts the developer role from writing syntax to directing architectural intent."
+        )
+        # Subsequent blocks are full text paragraphs
+        assert "Full essay text" in children[1]["paragraph"]["rich_text"][0]["text"]["content"]
+        assert "Second paragraph" in children[2]["paragraph"]["rich_text"][0]["text"]["content"]
+
+
+def test_create_mind_entry_rambling():
+    """Test create_mind_entry for RAMBLING writes to NOTION_RAMBLINGS_ID with child blocks."""
+    mock_client_inst = MagicMock()
+    mock_client_inst.databases.retrieve.return_value = {
+        "properties": {
+            "Name": {"type": "title"},
+        }
+    }
+    mock_client_cls = MagicMock(return_value=mock_client_inst)
+
+    with patch("app.notion_client.Client", mock_client_cls):
+        from app.notion_client import NotionAssistantClient
+        client = NotionAssistantClient(
+            token="fake_token",
+            tasks_db_id="tasks_db_123",
+            substack_db_id="substack_db_456",
+            ramblings_db_id="ramblings_db_789",
+            daily_logs_db_id="daily_logs_db_000",
+        )
+
+        client.create_mind_entry(
+            entry_type="RAMBLING",
+            title="Evening Walk Thoughts",
+            content="Thinking about compilers, AST transformations, and memory allocators.",
+            core_thesis="AST-based rewriting can optimize declarative pipelines.",
+        )
+
+        mock_client_inst.pages.create.assert_called_once()
+        call_kwargs = mock_client_inst.pages.create.call_args[1]
+        assert call_kwargs["parent"] == {"database_id": "ramblings_db_789"}
+
+        props = call_kwargs["properties"]
+        assert props["Name"] == {"title": [{"text": {"content": "Evening Walk Thoughts"}}]}
+
+        children = call_kwargs["children"]
+        assert children[0]["paragraph"]["rich_text"][0]["text"]["content"] == (
+            "AST-based rewriting can optimize declarative pipelines."
+        )
+        assert "compilers" in children[1]["paragraph"]["rich_text"][0]["text"]["content"]
+
+
+def test_create_mind_entry_daily_log():
+    """Test create_mind_entry for DAILY_LOG sets date property to today and writes to NOTION_DAILY_LOGS_ID."""
+    from datetime import datetime, timezone
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    mock_client_inst = MagicMock()
+    mock_client_inst.databases.retrieve.return_value = {
+        "properties": {
+            "Name": {"type": "title"},
+            "Date": {"type": "date"},
+        }
+    }
+    mock_client_cls = MagicMock(return_value=mock_client_inst)
+
+    with patch("app.notion_client.Client", mock_client_cls):
+        from app.notion_client import NotionAssistantClient
+        client = NotionAssistantClient(
+            token="fake_token",
+            tasks_db_id="tasks_db_123",
+            substack_db_id="substack_db_456",
+            ramblings_db_id="ramblings_db_789",
+            daily_logs_db_id="daily_logs_db_000",
+        )
+
+        client.create_mind_entry(
+            entry_type="DAILY_LOG",
+            title="Daily Reflection 2026-08-14",
+            content="Completed Phase B implementation and tested all endpoints.",
+            core_thesis="Steady iterative progress yields high reliability.",
+        )
+
+        mock_client_inst.pages.create.assert_called_once()
+        call_kwargs = mock_client_inst.pages.create.call_args[1]
+        assert call_kwargs["parent"] == {"database_id": "daily_logs_db_000"}
+
+        props = call_kwargs["properties"]
+        assert props["Name"] == {"title": [{"text": {"content": "Daily Reflection 2026-08-14"}}]}
+        assert props["Date"] == {"date": {"start": today_str}}
+
+
+def test_create_mind_entry_tasks_db_collision_rejected():
+    """Test that create_mind_entry rejects writing into NOTION_TASKS_DB_ID."""
+    mock_client_inst = MagicMock()
+    mock_client_cls = MagicMock(return_value=mock_client_inst)
+
+    with patch("app.notion_client.Client", mock_client_cls):
+        from app.notion_client import NotionAssistantClient
+        client = NotionAssistantClient(
+            token="fake_token",
+            tasks_db_id="shared_db_id",
+            substack_db_id="shared_db_id",  # Collision with tasks db
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            client.create_mind_entry(
+                entry_type="DRAFT_SUBSTACK",
+                title="Collision Test",
+                content="This should fail",
+            )
+        assert "NOTION_TASKS_DB_ID" in str(exc_info.value)
+
+
+def test_create_mind_entry_unconfigured_db_raises_error():
+    """Test that create_mind_entry raises ValueError if database ID is not configured."""
+    mock_client_inst = MagicMock()
+    mock_client_cls = MagicMock(return_value=mock_client_inst)
+
+    with patch("app.notion_client.Client", mock_client_cls):
+        from app.notion_client import NotionAssistantClient
+        client = NotionAssistantClient(
+            token="fake_token",
+            substack_db_id="",
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            client.create_mind_entry(
+                entry_type="DRAFT_SUBSTACK",
+                title="Missing DB",
+                content="This should fail",
+            )
+        assert "not configured" in str(exc_info.value)
+
+
+def test_build_mind_blocks_large_content_chunking():
+    """Test that _build_mind_blocks properly chunks paragraphs longer than 2000 characters."""
+    from app.notion_client import NotionAssistantClient
+    client = NotionAssistantClient(token="fake", tasks_db_id="db")
+
+    large_text = "A" * 4500
+    blocks = client._build_mind_blocks(core_thesis="Core thesis", content=large_text)
+
+    # 1 block for thesis, plus ceil(4500/2000) = 3 blocks for content
+    assert len(blocks) == 4
+    assert blocks[0]["paragraph"]["rich_text"][0]["text"]["content"] == "Core thesis"
+    assert len(blocks[1]["paragraph"]["rich_text"][0]["text"]["content"]) == 2000
+    assert len(blocks[2]["paragraph"]["rich_text"][0]["text"]["content"]) == 2000
+    assert len(blocks[3]["paragraph"]["rich_text"][0]["text"]["content"]) == 500
+
+
+# --- Learning Module Notion Client Tests ---
+
+def test_create_subject_page_success():
+    """Test creating a Subject page in NOTION_SUBJECTS_DB_ID with numbered_list_item children."""
+    mock_client_inst = MagicMock()
+    mock_client_inst.databases.retrieve.return_value = {
+        "properties": {
+            "Subject": {"type": "title"},
+            "Completed tasks": {"type": "rollup"},
+            "% Completed": {"type": "rollup"},
+        }
+    }
+    mock_client_inst.pages.create.return_value = {
+        "id": "subj-123",
+        "url": "https://notion.so/subj-123",
+    }
+    mock_client_cls = MagicMock(return_value=mock_client_inst)
+
+    with patch("app.notion_client.Client", mock_client_cls):
+        from app.notion_client import NotionAssistantClient
+        client = NotionAssistantClient(
+            token="fake_token",
+            subjects_db_id="subjects_db_123",
+        )
+
+        res = client.create_subject_page(
+            title="Distributed Systems",
+            curriculum_topics=[
+                "1. Foundations of Consensus",
+                "2. Raft Protocol in Depth",
+            ],
+        )
+
+        assert res["id"] == "subj-123"
+        mock_client_inst.pages.create.assert_called_once()
+        create_kwargs = mock_client_inst.pages.create.call_args[1]
+
+        # Verify parent DB
+        assert create_kwargs["parent"] == {"database_id": "subjects_db_123"}
+
+        # Verify title
+        assert create_kwargs["properties"]["Subject"]["title"][0]["text"]["content"] == "Distributed Systems"
+
+        # Verify children are numbered_list_item blocks
+        children = create_kwargs["children"]
+        assert len(children) == 2
+        assert children[0]["type"] == "numbered_list_item"
+        assert children[0]["numbered_list_item"]["rich_text"][0]["text"]["content"] == "1. Foundations of Consensus"
+        assert children[1]["numbered_list_item"]["rich_text"][0]["text"]["content"] == "2. Raft Protocol in Depth"
+
+        # Verify rollups are not touched
+        assert "Completed tasks" not in create_kwargs["properties"]
+        assert "% Completed" not in create_kwargs["properties"]
+
+
+def test_create_resource_row_success():
+    """Test creating a Resource row in NOTION_RESOURCES_DB_ID with relation to Subject."""
+    mock_client_inst = MagicMock()
+    mock_client_inst.databases.retrieve.return_value = {
+        "properties": {
+            "Resource Name": {"type": "title"},
+            "Type": {"type": "select"},
+            "URL": {"type": "url"},
+            "Subjects": {"type": "relation"},
+        }
+    }
+    mock_client_inst.pages.create.return_value = {"id": "res-999"}
+    mock_client_cls = MagicMock(return_value=mock_client_inst)
+
+    with patch("app.notion_client.Client", mock_client_cls):
+        from app.notion_client import NotionAssistantClient
+        client = NotionAssistantClient(
+            token="fake_token",
+            resources_db_id="resources_db_123",
+        )
+
+        res = client.create_resource_row(
+            name="Raft Paper",
+            url="https://raft.github.io/raft.pdf",
+            resource_type="Paper",
+            subject_page_id="subj-123",
+        )
+
+        assert res["id"] == "res-999"
+        mock_client_inst.pages.create.assert_called_once()
+        create_kwargs = mock_client_inst.pages.create.call_args[1]
+        props = create_kwargs["properties"]
+
+        assert props["Resource Name"]["title"][0]["text"]["content"] == "Raft Paper"
+        assert props["Type"]["select"]["name"] == "Paper"
+        assert props["URL"]["url"] == "https://raft.github.io/raft.pdf"
+        assert props["Subjects"]["relation"][0]["id"] == "subj-123"
+
+
+def test_create_starter_task_with_learning_tag():
+    """Test creating a starter task with Tag='Learning' Literal."""
+    mock_client_inst = MagicMock()
+    mock_client_inst.databases.retrieve.return_value = {
+        "properties": {
+            "Task name": {"type": "title"},
+            "Status": {"type": "status"},
+            "Tags": {"type": "multi_select"},
+            "Subject": {"type": "relation"},
+        }
+    }
+    mock_client_inst.pages.create.return_value = {"id": "task-555"}
+    mock_client_cls = MagicMock(return_value=mock_client_inst)
+
+    with patch("app.notion_client.Client", mock_client_cls):
+        from app.notion_client import NotionAssistantClient
+        client = NotionAssistantClient(
+            token="fake_token",
+            tasks_db_id="tasks_db_123",
+            subjects_db_id="subjects_db_123",
+        )
+
+        res = client.create_starter_task(
+            title="Read Chapter 1",
+            subject_page_id="subj-123",
+        )
+
+        assert res["id"] == "task-555"
+        mock_client_inst.pages.create.assert_called_once()
+        create_kwargs = mock_client_inst.pages.create.call_args[1]
+        props = create_kwargs["properties"]
+
+        assert props["Task name"]["title"][0]["text"]["content"] == "Read Chapter 1"
+        assert props["Status"]["status"]["name"] == "Not started"
+        assert props["Tags"]["multi_select"][0]["name"] == "Learning"
+        assert props["Subject"]["relation"][0]["id"] == "subj-123"
+
+
+def test_create_leetcode_log_row_success():
+    """Test creating a LeetCode problem review row in NOTION_LEETCODE_LOG_DB_ID."""
+    mock_client_inst = MagicMock()
+    mock_client_inst.databases.retrieve.return_value = {
+        "properties": {
+            "Problem": {"type": "title"},
+            "Difficulty": {"type": "select"},
+            "Verdict": {"type": "select"},
+            "Time Complexity": {"type": "rich_text"},
+            "Space Complexity": {"type": "rich_text"},
+            "Date": {"type": "date"},
+            "URL": {"type": "url"},
+            "Patterns": {"type": "multi_select"},
+        }
+    }
+    mock_client_inst.pages.create.return_value = {
+        "id": "lc-row-456",
+        "url": "https://notion.so/lc-row-456",
+    }
+    mock_client_cls = MagicMock(return_value=mock_client_inst)
+
+    with patch("app.notion_client.Client", mock_client_cls):
+        from app.notion_client import NotionAssistantClient
+        client = NotionAssistantClient(
+            token="fake_token",
+            leetcode_log_db_id="lc_db_123",
+        )
+
+        res = client.create_leetcode_log_row(
+            problem_title="Two Sum",
+            difficulty="Easy",
+            verdict="Correct",
+            time_complexity="O(N)",
+            space_complexity="O(N)",
+            is_optimal=True,
+            review_text="Optimal hash map approach.",
+            testing_questions=["What if nums contains duplicate elements?"],
+            code="def twoSum(nums, target): pass",
+            problem_url="https://leetcode.com/problems/two-sum/",
+            patterns=["Array", "Hash Table"],
+        )
+
+        assert res["id"] == "lc-row-456"
+        mock_client_inst.pages.create.assert_called_once()
+        create_kwargs = mock_client_inst.pages.create.call_args[1]
+        assert create_kwargs["parent"] == {"database_id": "lc_db_123"}
+        props = create_kwargs["properties"]
+
+        assert props["Problem"]["title"][0]["text"]["content"] == "Two Sum"
+        assert props["Difficulty"]["select"]["name"] == "Easy"
+        assert props["Verdict"]["select"]["name"] == "Correct"
+        assert props["Time Complexity"]["rich_text"][0]["text"]["content"] == "O(N)"
+        assert props["Space Complexity"]["rich_text"][0]["text"]["content"] == "O(N)"
+        assert props["URL"]["url"] == "https://leetcode.com/problems/two-sum/"
+        assert props["Patterns"]["multi_select"][0]["name"] == "Array"
+
+        # Verify child blocks
+        children = create_kwargs["children"]
+        assert len(children) >= 4
+        # 1st block is callout
+        assert children[0]["type"] == "callout"
+        # Includes code block
+        assert any(c["type"] == "code" for c in children)
+
+
+
+
+

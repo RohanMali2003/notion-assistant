@@ -43,3 +43,24 @@ def test_config_success_when_vars_present():
         assert app.config.settings.NOTION_DATABASE_ID == "test_db_id"
         assert app.config.settings.TELEGRAM_BOT_TOKEN == "test_bot_token"
         assert app.config.settings.TELEGRAM_CHAT_ID == "12345"
+
+
+def test_config_mind_db_ids():
+    """Verify that MIND module database IDs are loaded into settings."""
+    env_valid = {
+        "NOTION_TOKEN": "test_notion_token",
+        "NOTION_DATABASE_ID": "test_db_id",
+        "TELEGRAM_BOT_TOKEN": "test_bot_token",
+        "TELEGRAM_CHAT_ID": "12345",
+        "NOTION_SUBSTACK_ID": "substack_123",
+        "NOTION_RAMBLINGS_ID": "ramblings_456",
+        "NOTION_DAILY_LOGS_ID": "daily_logs_789",
+    }
+    with patch.dict(os.environ, env_valid, clear=True):
+        if "app.config" in sys.modules:
+            del sys.modules["app.config"]
+
+        import app.config
+        assert app.config.settings.NOTION_SUBSTACK_ID == "substack_123"
+        assert app.config.settings.NOTION_RAMBLINGS_ID == "ramblings_456"
+        assert app.config.settings.NOTION_DAILY_LOGS_ID == "daily_logs_789"

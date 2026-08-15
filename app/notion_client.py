@@ -11,7 +11,7 @@ except ImportError:
     Client = None
     APIResponseError = None
 
-from app.schemas import ReminderItem
+from app.schemas import LEARNING_TAG, ReminderItem
 
 logger = logging.getLogger(__name__)
 
@@ -39,20 +39,72 @@ class TaskDict(dict):
 class NotionAssistantClient:
     """Thin wrapper around notion-client for Notion API interactions."""
 
-    def __init__(self, token: Optional[str] = None, database_id: Optional[str] = None):
-        if token is None or database_id is None:
-            from app.config import settings
-            token = token or getattr(settings, "NOTION_TOKEN", None) or os.getenv("NOTION_TOKEN")
-            database_id = (
-                database_id
-                or getattr(settings, "NOTION_TASKS_DB_ID", None)
+    def __init__(
+        self,
+        token: Optional[str] = None,
+        database_id: Optional[str] = None,
+        tasks_db_id: Optional[str] = None,
+        substack_db_id: Optional[str] = None,
+        ramblings_db_id: Optional[str] = None,
+        daily_logs_db_id: Optional[str] = None,
+        subjects_db_id: Optional[str] = None,
+        resources_db_id: Optional[str] = None,
+        leetcode_log_db_id: Optional[str] = None,
+    ):
+        from app.config import settings
+
+        self.token = token or getattr(settings, "NOTION_TOKEN", None) or os.getenv("NOTION_TOKEN")
+        if tasks_db_id is not None:
+            tasks_id = tasks_db_id
+        elif database_id is not None:
+            tasks_id = database_id
+        else:
+            tasks_id = (
+                getattr(settings, "NOTION_TASKS_DB_ID", None)
                 or os.getenv("NOTION_TASKS_DB_ID")
                 or getattr(settings, "NOTION_DATABASE_ID", None)
                 or os.getenv("NOTION_DATABASE_ID")
             )
 
-        self.token = token
-        self.database_id = database_id
+        self.database_id = tasks_id
+        self.tasks_db_id = tasks_id
+
+        if substack_db_id is not None:
+            self.substack_db_id = substack_db_id
+        else:
+            self.substack_db_id = getattr(settings, "NOTION_SUBSTACK_ID", None) or os.getenv("NOTION_SUBSTACK_ID", "")
+
+        if ramblings_db_id is not None:
+            self.ramblings_db_id = ramblings_db_id
+        else:
+            self.ramblings_db_id = getattr(settings, "NOTION_RAMBLINGS_ID", None) or os.getenv("NOTION_RAMBLINGS_ID", "")
+
+        if daily_logs_db_id is not None:
+            self.daily_logs_db_id = daily_logs_db_id
+        else:
+            self.daily_logs_db_id = getattr(settings, "NOTION_DAILY_LOGS_ID", None) or os.getenv("NOTION_DAILY_LOGS_ID", "")
+
+        if subjects_db_id is not None:
+            self.subjects_db_id = subjects_db_id
+        else:
+            self.subjects_db_id = getattr(settings, "NOTION_SUBJECTS_DB_ID", None) or os.getenv("NOTION_SUBJECTS_DB_ID", "")
+
+        if resources_db_id is not None:
+            self.resources_db_id = resources_db_id
+        else:
+            self.resources_db_id = getattr(settings, "NOTION_RESOURCES_DB_ID", None) or os.getenv("NOTION_RESOURCES_DB_ID", "")
+
+        if leetcode_log_db_id is not None:
+            self.leetcode_log_db_id = leetcode_log_db_id
+        else:
+            self.leetcode_log_db_id = (
+                getattr(settings, "NOTION_LEETCODE_LOG_DB_ID", None)
+                or os.getenv("NOTION_LEETCODE_LOG_DB_ID")
+                or os.getenv("NOTION_LEETCODE_DB_ID", "")
+            )
+
+        self._db_props_cache: Dict[str, Dict[str, str]] = {}
+
         if Client is not None and self.token:
             self.client = Client(auth=self.token, notion_version="2022-06-28")
         else:
@@ -142,23 +194,182 @@ class NotionAssistantClient:
 
                 raise exc
 
-    def _get_db_properties_schema(self) -> Dict[str, str]:
+    def _get_db_properties_schema(self, database_id: Optional[str] = None) -> Dict[str, str]:
         """Returns dict of property_name -> property_type for target database."""
-        if hasattr(self, "_db_props_cache") and self._db_props_cache:
-            return self._db_props_cache
+        target_db = database_id or self.database_id
+        if not target_db:
+            return {}
+        if not hasattr(self, "_db_props_cache") or self._db_props_cache is None:
+            self._db_props_cache = {}
+        if target_db in self._db_props_cache:
+            return self._db_props_cache[target_db]
         if self.client is None:
             return {}
         try:
-            db = self.client.databases.retrieve(self.database_id)
+            db = self.client.databases.retrieve(target_db)
             if not isinstance(db, dict):
                 return {}
             props = db.get("properties")
             if not isinstance(props, dict):
                 return {}
-            self._db_props_cache = {name: info.get("type") for name, info in props.items() if isinstance(info, dict)}
-            return self._db_props_cache
+            schema = {name: info.get("type") for name, info in props.items() if isinstance(info, dict)}
+            self._db_props_cache[target_db] = schema
+            return schema
         except Exception:
             return {}
+
+    def _build_mind_blocks(self, core_thesis: Optional[str], content: str) -> List[Dict[str, Any]]:
+        """Constructs child paragraph blocks: 1st block is the core thesis, followed by full text paragraphs."""
+        blocks: List[Dict[str, Any]] = []
+
+        def make_paragraph_block(text_content: str) -> Dict[str, Any]:
+            return {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [
+                        {
+                            "type": "text",
+                            "text": {"content": text_content}
+                        }
+                    ]
+                }
+            }
+
+        # 1. First block: One-sentence core thesis
+        if core_thesis and core_thesis.strip():
+            thesis_clean = core_thesis.strip()
+            for i in range(0, len(thesis_clean), 2000):
+                blocks.append(make_paragraph_block(thesis_clean[i:i + 2000]))
+
+        # 2. Following blocks: Full text content
+        if content and content.strip():
+            lines = content.strip().split("\n")
+            for line in lines:
+                line_str = line.strip()
+                if not line_str:
+                    blocks.append(make_paragraph_block(""))
+                    continue
+                for i in range(0, len(line_str), 2000):
+                    blocks.append(make_paragraph_block(line_str[i:i + 2000]))
+
+        if not blocks:
+            blocks.append(make_paragraph_block(""))
+
+        return blocks
+
+    def create_mind_entry(
+        self,
+        entry_type: str,
+        title: str,
+        content: str,
+        core_thesis: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Creates a new row in the appropriate MIND Notion database (Substack, Ramblings, or Daily Logs)
+
+        and appends child blocks with the core thesis and full body text.
+        """
+        normalized_type = entry_type.upper()
+        if normalized_type in ("SUBSTACK_DRAFT", "DRAFT_SUBSTACK", "SUBSTACK"):
+            target_db_id = self.substack_db_id
+            destination_type = "DRAFT_SUBSTACK"
+        elif normalized_type in ("RAMBLING", "RAMBLINGS", "THOUGHT", "BRAIN_DUMP"):
+            target_db_id = self.ramblings_db_id
+            destination_type = "RAMBLING"
+        elif normalized_type in ("DAILY_LOG", "DAILY_LOGS", "LOG", "REFLECTION"):
+            target_db_id = self.daily_logs_db_id
+            destination_type = "DAILY_LOG"
+        else:
+            target_db_id = self.daily_logs_db_id
+            destination_type = "DAILY_LOG"
+
+        if not target_db_id:
+            raise ValueError(
+                f"Notion database ID for MIND entry type '{destination_type}' is not configured."
+            )
+
+        if self.tasks_db_id and target_db_id == self.tasks_db_id:
+            raise ValueError(
+                f"Destination database for MIND entry type '{destination_type}' matches NOTION_TASKS_DB_ID. "
+                "Mind entries must NOT be written to the tasks database."
+            )
+
+        schema = self._get_db_properties_schema(target_db_id)
+
+        # 1. Determine Title property key
+        title_key = "Name"
+        for k, v in schema.items():
+            if v == "title":
+                title_key = k
+                break
+        else:
+            for candidate in ["Title", "Name", "Topic", "Log", "Entry"]:
+                if candidate in schema:
+                    title_key = candidate
+                    break
+
+        properties: Dict[str, Any] = {
+            title_key: {
+                "title": [
+                    {"text": {"content": title or "Untitled"}}
+                ]
+            }
+        }
+
+        # 2. Destination-specific properties
+        if destination_type == "DRAFT_SUBSTACK":
+            # Set Status to "Idea"
+            if "Status" in schema:
+                status_type = schema.get("Status")
+                if status_type == "select":
+                    properties["Status"] = {"select": {"name": "Idea"}}
+                else:
+                    properties["Status"] = {"status": {"name": "Idea"}}
+            else:
+                properties["Status"] = {"status": {"name": "Idea"}}
+
+        elif destination_type == "DAILY_LOG":
+            # Set Date property to today's date (YYYY-MM-DD)
+            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            date_key = "Date"
+            for k, v in schema.items():
+                if v == "date":
+                    date_key = k
+                    break
+            else:
+                for candidate in ["Date", "Log Date", "Created Date", "Date of Log", "Due date", "Due Date"]:
+                    if candidate in schema:
+                        date_key = candidate
+                        break
+            properties[date_key] = {"date": {"start": today_str}}
+
+        # Optional tags if schema supports multi_select or select
+        if tags:
+            for tag_candidate in ["Tags", "Tag", "Category", "Topics"]:
+                if tag_candidate in schema:
+                    prop_type = schema[tag_candidate]
+                    if prop_type == "multi_select":
+                        properties[tag_candidate] = {"multi_select": [{"name": t} for t in tags]}
+                    elif prop_type == "select":
+                        properties[tag_candidate] = {"select": {"name": tags[0]}}
+                    break
+
+        # 3. Construct child blocks (1st block = core thesis, following = full text)
+        thesis = core_thesis
+        if not thesis and content:
+            thesis = content.strip().split(".")[0].strip()
+            if thesis:
+                thesis += "."
+
+        children_blocks = self._build_mind_blocks(thesis, content)
+
+        return self._request_with_retry(
+            self.client.pages.create,
+            parent={"database_id": target_db_id},
+            properties=properties,
+            children=children_blocks,
+        )
 
     def create_task(
         self,
@@ -484,4 +695,450 @@ class NotionAssistantClient:
             properties=update_props,
         )
         return (True, matched_title, updated_page)
+
+    def create_subject_page(
+        self,
+        title: str,
+        curriculum_topics: List[str],
+    ) -> Dict[str, Any]:
+        """Creates the Subject page in NOTION_SUBJECTS_DB_ID with Subject title and
+
+        a children array of numbered_list_item blocks for the curriculum.
+        Leaves Completed tasks and % Completed untouched as read-only rollups.
+        """
+        target_db_id = self.subjects_db_id
+        if not target_db_id:
+            raise ValueError("NOTION_SUBJECTS_DB_ID is not configured.")
+
+        schema = self._get_db_properties_schema(target_db_id)
+
+        # Determine title property key (e.g. 'Subject', 'Name', 'Title')
+        title_key = "Subject"
+        if "Subject" in schema:
+            title_key = "Subject"
+        else:
+            for k, v in schema.items():
+                if v == "title":
+                    title_key = k
+                    break
+
+        properties: Dict[str, Any] = {
+            title_key: {
+                "title": [
+                    {"text": {"content": title}}
+                ]
+            }
+        }
+
+        # Build children array of numbered_list_item blocks directly in payload
+        children_blocks: List[Dict[str, Any]] = []
+        for topic in curriculum_topics:
+            topic_str = topic.strip()
+            if not topic_str:
+                continue
+            children_blocks.append({
+                "object": "block",
+                "type": "numbered_list_item",
+                "numbered_list_item": {
+                    "rich_text": [
+                        {
+                            "type": "text",
+                            "text": {"content": topic_str}
+                        }
+                    ]
+                }
+            })
+
+        return self._request_with_retry(
+            self.client.pages.create,
+            parent={"database_id": target_db_id},
+            properties=properties,
+            children=children_blocks,
+        )
+
+    def create_resource_row(
+        self,
+        name: str,
+        url: str,
+        resource_type: str,
+        subject_page_id: str,
+    ) -> Dict[str, Any]:
+        """Creates a row in NOTION_RESOURCES_DB_ID: Resource Name (title),
+
+        Type (select), URL, and Subjects (relation to Subject page ID).
+        """
+        target_db_id = self.resources_db_id
+        if not target_db_id:
+            raise ValueError("NOTION_RESOURCES_DB_ID is not configured.")
+
+        schema = self._get_db_properties_schema(target_db_id)
+
+        title_key = "Resource Name"
+        if "Resource Name" in schema:
+            title_key = "Resource Name"
+        elif "Name" in schema:
+            title_key = "Name"
+        elif "Title" in schema:
+            title_key = "Title"
+        else:
+            for k, v in schema.items():
+                if v == "title":
+                    title_key = k
+                    break
+
+        rel_key = "Subjects"
+        if "Subjects" in schema:
+            rel_key = "Subjects"
+        elif "Subject" in schema:
+            rel_key = "Subject"
+
+        type_key = "Type" if (not schema or "Type" in schema) else "Resource Type"
+
+        properties: Dict[str, Any] = {
+            title_key: {
+                "title": [
+                    {"text": {"content": name or url}}
+                ]
+            },
+            type_key: {
+                "select": {
+                    "name": resource_type
+                }
+            },
+            "URL": {
+                "url": url
+            },
+            rel_key: {
+                "relation": [
+                    {"id": subject_page_id}
+                ]
+            }
+        }
+
+        return self._request_with_retry(
+            self.client.pages.create,
+            parent={"database_id": target_db_id},
+            properties=properties,
+        )
+
+    def create_starter_task(
+        self,
+        title: str,
+        subject_page_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Creates a starter task in NOTION_TASKS_DB_ID with Tags=['Learning']
+
+        and links it back to the Subject relation property.
+        """
+        schema = self._get_db_properties_schema(self.tasks_db_id)
+
+        title_key = "Name"
+        if "Task name" in schema:
+            title_key = "Task name"
+        elif "Title" in schema:
+            title_key = "Title"
+        elif "Name" in schema:
+            title_key = "Name"
+        else:
+            for k, v in schema.items():
+                if v == "title":
+                    title_key = k
+                    break
+
+        properties: Dict[str, Any] = {
+            title_key: {
+                "title": [
+                    {"text": {"content": title}}
+                ]
+            },
+            "Status": {
+                "status": {
+                    "name": "Not started"
+                }
+            }
+        }
+
+        if "Tags" in schema:
+            tag_type = schema.get("Tags")
+            if tag_type == "multi_select":
+                properties["Tags"] = {"multi_select": [{"name": LEARNING_TAG}]}
+            else:
+                properties["Tags"] = {"select": {"name": LEARNING_TAG}}
+        elif "Tag" in schema:
+            tag_type = schema.get("Tag")
+            if tag_type == "multi_select":
+                properties["Tag"] = {"multi_select": [{"name": LEARNING_TAG}]}
+            else:
+                properties["Tag"] = {"select": {"name": LEARNING_TAG}}
+        else:
+            properties["Tags"] = {"multi_select": [{"name": LEARNING_TAG}]}
+
+        if subject_page_id:
+            for rel_candidate in ["Subject", "Subjects", "Course", "Topic"]:
+                if rel_candidate in schema:
+                    properties[rel_candidate] = {"relation": [{"id": subject_page_id}]}
+                    break
+
+        created_task = self._request_with_retry(
+            self.client.pages.create,
+            parent={"database_id": self.tasks_db_id},
+            properties=properties,
+        )
+
+        # Also link back via Subject Tasks relation if configured on Subject page
+        if subject_page_id and self.subjects_db_id:
+            try:
+                subj_schema = self._get_db_properties_schema(self.subjects_db_id)
+                if "Tasks" in subj_schema:
+                    task_id = created_task.get("id")
+                    if task_id:
+                        self._request_with_retry(
+                            self.client.pages.update,
+                            page_id=subject_page_id,
+                            properties={"Tasks": {"relation": [{"id": task_id}]}}
+                        )
+            except Exception as subj_err:
+                logger.debug("Could not link task back to Subject page: %s", subj_err)
+
+        return created_task
+
+    def _build_leetcode_blocks(
+        self,
+        verdict: Optional[str] = None,
+        time_complexity: Optional[str] = None,
+        space_complexity: Optional[str] = None,
+        is_optimal: bool = True,
+        review_text: str = "",
+        testing_questions: Optional[List[str]] = None,
+        code: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Constructs Notion child blocks for LeetCode problem review log."""
+        blocks: List[Dict[str, Any]] = []
+
+        def make_paragraph(text_content: str) -> Dict[str, Any]:
+            return {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [
+                        {"type": "text", "text": {"content": text_content[:2000]}}
+                    ]
+                }
+            }
+
+        def make_heading_2(text_content: str) -> Dict[str, Any]:
+            return {
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {
+                    "rich_text": [
+                        {"type": "text", "text": {"content": text_content[:2000]}}
+                    ]
+                }
+            }
+
+        def make_bullet_item(text_content: str) -> Dict[str, Any]:
+            return {
+                "object": "block",
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {
+                    "rich_text": [
+                        {"type": "text", "text": {"content": text_content[:2000]}}
+                    ]
+                }
+            }
+
+        # 1. Summary Callout Block
+        verdict_str = verdict or "Evaluated"
+        opt_str = "Optimal approach" if is_optimal else "Suboptimal approach"
+        summary_lines = [
+            f"Verdict: {verdict_str} ({opt_str})",
+            f"Time Complexity: {time_complexity or 'N/A'}",
+            f"Space Complexity: {space_complexity or 'N/A'}",
+        ]
+        callout_text = "\n".join(summary_lines)
+        blocks.append({
+            "object": "block",
+            "type": "callout",
+            "callout": {
+                "rich_text": [
+                    {"type": "text", "text": {"content": callout_text[:2000]}}
+                ],
+                "icon": {"emoji": "💻"}
+            }
+        })
+
+        # 2. Review Breakdown
+        if review_text and review_text.strip():
+            blocks.append(make_heading_2("Analysis & Complexity Review"))
+            for paragraph in review_text.strip().split("\n\n"):
+                clean_p = paragraph.strip()
+                if not clean_p:
+                    continue
+                for i in range(0, len(clean_p), 2000):
+                    blocks.append(make_paragraph(clean_p[i:i + 2000]))
+
+        # 3. Targeted Testing Questions
+        if testing_questions:
+            blocks.append(make_heading_2("Targeted Testing & Logic Questions"))
+            for q in testing_questions:
+                clean_q = q.strip().lstrip("•-*0123456789. ")
+                if clean_q:
+                    for i in range(0, len(clean_q), 2000):
+                        blocks.append(make_bullet_item(clean_q[i:i + 2000]))
+
+        # 4. Submitted Solution Code
+        if code and code.strip():
+            blocks.append(make_heading_2("Submitted Solution"))
+            clean_code = code.strip()
+            # Notion code blocks have 2000 character limit per rich_text element
+            code_text_chunks = [
+                {"type": "text", "text": {"content": clean_code[i:i + 2000]}}
+                for i in range(0, min(len(clean_code), 4000), 2000)
+            ]
+            blocks.append({
+                "object": "block",
+                "type": "code",
+                "code": {
+                    "rich_text": code_text_chunks,
+                    "language": "python"
+                }
+            })
+
+        return blocks
+
+    def create_leetcode_log_row(
+        self,
+        problem_title: str,
+        difficulty: Optional[str] = None,
+        verdict: Optional[str] = None,
+        time_complexity: Optional[str] = None,
+        space_complexity: Optional[str] = None,
+        is_optimal: bool = True,
+        review_text: str = "",
+        testing_questions: Optional[List[str]] = None,
+        code: Optional[str] = None,
+        problem_url: Optional[str] = None,
+        patterns: Optional[List[str]] = None,
+        database_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Creates a row in NOTION_LEETCODE_LOG_DB_ID for a LeetCode problem review."""
+        target_db_id = database_id or self.leetcode_log_db_id
+        if not target_db_id:
+            raise ValueError("NOTION_LEETCODE_LOG_DB_ID is not configured.")
+
+        schema = self._get_db_properties_schema(target_db_id)
+
+        # Title Property Key
+        title_key = "Problem"
+        if "Problem" in schema:
+            title_key = "Problem"
+        elif "Problem Name" in schema:
+            title_key = "Problem Name"
+        elif "Name" in schema:
+            title_key = "Name"
+        elif "Title" in schema:
+            title_key = "Title"
+        else:
+            for k, v in schema.items():
+                if v == "title":
+                    title_key = k
+                    break
+
+        properties: Dict[str, Any] = {
+            title_key: {
+                "title": [
+                    {"text": {"content": problem_title}}
+                ]
+            }
+        }
+
+        # Difficulty
+        if difficulty:
+            for diff_key in ["Difficulty", "difficulty"]:
+                if diff_key in schema:
+                    prop_type = schema[diff_key]
+                    if prop_type == "select":
+                        properties[diff_key] = {"select": {"name": difficulty}}
+                    elif prop_type == "rich_text":
+                        properties[diff_key] = {"rich_text": [{"text": {"content": difficulty}}]}
+                    break
+
+        # Verdict / Status
+        verdict_val = verdict or "Solved"
+        for verdict_key in ["Verdict", "Status", "Result"]:
+            if verdict_key in schema:
+                prop_type = schema[verdict_key]
+                if prop_type == "select":
+                    properties[verdict_key] = {"select": {"name": verdict_val}}
+                elif prop_type == "status":
+                    properties[verdict_key] = {"status": {"name": verdict_val}}
+                elif prop_type == "rich_text":
+                    properties[verdict_key] = {"rich_text": [{"text": {"content": verdict_val}}]}
+                break
+
+        # Time Complexity
+        if time_complexity:
+            for tc_key in ["Time Complexity", "Time complexity", "Time"]:
+                if tc_key in schema:
+                    prop_type = schema[tc_key]
+                    if prop_type == "rich_text":
+                        properties[tc_key] = {"rich_text": [{"text": {"content": time_complexity}}]}
+                    elif prop_type == "select":
+                        properties[tc_key] = {"select": {"name": time_complexity}}
+                    break
+
+        # Space Complexity
+        if space_complexity:
+            for sc_key in ["Space Complexity", "Space complexity", "Space"]:
+                if sc_key in schema:
+                    prop_type = schema[sc_key]
+                    if prop_type == "rich_text":
+                        properties[sc_key] = {"rich_text": [{"text": {"content": space_complexity}}]}
+                    elif prop_type == "select":
+                        properties[sc_key] = {"select": {"name": space_complexity}}
+                    break
+
+        # Date
+        for date_key in ["Date", "Review Date", "Created Date"]:
+            if date_key in schema and schema[date_key] == "date":
+                properties[date_key] = {"date": {"start": datetime.now(timezone.utc).strftime("%Y-%m-%d")}}
+                break
+
+        # URL
+        if problem_url:
+            for url_key in ["URL", "Link", "LeetCode URL"]:
+                if url_key in schema and schema[url_key] == "url":
+                    properties[url_key] = {"url": problem_url}
+                    break
+
+        # Patterns
+        if patterns:
+            for pat_key in ["Patterns", "Pattern", "Tags", "Tag"]:
+                if pat_key in schema:
+                    prop_type = schema[pat_key]
+                    if prop_type == "multi_select":
+                        properties[pat_key] = {"multi_select": [{"name": p} for p in patterns[:5]]}
+                    elif prop_type == "select":
+                        properties[pat_key] = {"select": {"name": patterns[0]}}
+                    break
+
+        # Build child blocks
+        children_blocks = self._build_leetcode_blocks(
+            verdict=verdict,
+            time_complexity=time_complexity,
+            space_complexity=space_complexity,
+            is_optimal=is_optimal,
+            review_text=review_text,
+            testing_questions=testing_questions,
+            code=code,
+        )
+
+        return self._request_with_retry(
+            self.client.pages.create,
+            parent={"database_id": target_db_id},
+            properties=properties,
+            children=children_blocks,
+        )
+
 

@@ -35,10 +35,24 @@ class Settings:
     NOTION_DATABASE_ID: str = os.environ["NOTION_DATABASE_ID"]
     TELEGRAM_BOT_TOKEN: str = os.environ["TELEGRAM_BOT_TOKEN"]
     TELEGRAM_CHAT_ID: str = os.environ["TELEGRAM_CHAT_ID"]
+    NOTION_TASKS_DB_ID: str = os.getenv("NOTION_TASKS_DB_ID", os.environ.get("NOTION_DATABASE_ID", ""))
+    NOTION_SUBSTACK_ID: str = os.getenv("NOTION_SUBSTACK_ID", "")
+    NOTION_RAMBLINGS_ID: str = os.getenv("NOTION_RAMBLINGS_ID", "")
+    NOTION_DAILY_LOGS_ID: str = os.getenv("NOTION_DAILY_LOGS_ID", "")
+    NOTION_SUBJECTS_DB_ID: str = os.getenv("NOTION_SUBJECTS_DB_ID", "")
+    NOTION_RESOURCES_DB_ID: str = os.getenv("NOTION_RESOURCES_DB_ID", "")
+    NOTION_LEETCODE_LOG_DB_ID: str = os.getenv("NOTION_LEETCODE_LOG_DB_ID", os.getenv("NOTION_LEETCODE_DB_ID", ""))
+    GITHUB_PAT: str = os.getenv("GITHUB_PAT", "")
+    GITHUB_LEETHUB_REPO: str = os.getenv("GITHUB_LEETHUB_REPO", "")
     APP_ENV: str = os.getenv("APP_ENV", "production")
     PORT: int = int(os.getenv("PORT", "8000"))
     WEBHOOK_SECRET: str = os.getenv("WEBHOOK_SECRET", "")
     TELEGRAM_WEBHOOK_SECRET: str = os.getenv("TELEGRAM_WEBHOOK_SECRET", os.getenv("WEBHOOK_SECRET", ""))
+    WHATSAPP_VERIFY_TOKEN: str = os.getenv("WHATSAPP_VERIFY_TOKEN", "")
+    WHATSAPP_TOKEN: str = os.getenv("WHATSAPP_TOKEN", "")
+    WHATSAPP_PHONE_NUMBER_ID: str = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+    WHATSAPP_API_URL: str = os.getenv("WHATSAPP_API_URL", "https://graph.facebook.com/v20.0")
 
 
 settings = Settings()
+
