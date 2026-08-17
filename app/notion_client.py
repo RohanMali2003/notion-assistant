@@ -51,18 +51,26 @@ class NotionAssistantClient:
         resources_db_id: Optional[str] = None,
         leetcode_log_db_id: Optional[str] = None,
     ):
-        from app.config import settings
+        try:
+            from app.config import settings
+        except Exception:
+            settings = None
 
-        self.token = token or getattr(settings, "NOTION_TOKEN", None) or os.getenv("NOTION_TOKEN")
+        self.token = (
+            token
+            or (getattr(settings, "NOTION_TOKEN", None) if settings else None)
+            or os.getenv("NOTION_TOKEN")
+            or os.getenv("NOTION_API_KEY")
+        )
         if tasks_db_id is not None:
             tasks_id = tasks_db_id
         elif database_id is not None:
             tasks_id = database_id
         else:
             tasks_id = (
-                getattr(settings, "NOTION_TASKS_DB_ID", None)
+                (getattr(settings, "NOTION_TASKS_DB_ID", None) if settings else None)
                 or os.getenv("NOTION_TASKS_DB_ID")
-                or getattr(settings, "NOTION_DATABASE_ID", None)
+                or (getattr(settings, "NOTION_DATABASE_ID", None) if settings else None)
                 or os.getenv("NOTION_DATABASE_ID")
             )
 

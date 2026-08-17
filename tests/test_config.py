@@ -64,3 +64,21 @@ def test_config_mind_db_ids():
         assert app.config.settings.NOTION_SUBSTACK_ID == "substack_123"
         assert app.config.settings.NOTION_RAMBLINGS_ID == "ramblings_456"
         assert app.config.settings.NOTION_DAILY_LOGS_ID == "daily_logs_789"
+
+
+def test_config_aliases_support():
+    """Verify that NOTION_API_KEY and NOTION_TASKS_DB_ID are accepted as valid aliases."""
+    env_valid = {
+        "NOTION_API_KEY": "test_alias_token",
+        "NOTION_TASKS_DB_ID": "test_alias_db_id",
+        "TELEGRAM_BOT_TOKEN": "test_bot_token",
+        "TELEGRAM_CHAT_ID": "12345",
+    }
+    with patch("pathlib.Path.is_file", return_value=False), patch.dict(os.environ, env_valid, clear=True):
+        if "app.config" in sys.modules:
+            del sys.modules["app.config"]
+
+        import app.config
+        assert app.config.settings.NOTION_TOKEN == "test_alias_token"
+        assert app.config.settings.NOTION_DATABASE_ID == "test_alias_db_id"
+        assert app.config.settings.NOTION_TASKS_DB_ID == "test_alias_db_id"

@@ -10,6 +10,13 @@ if env_file.is_file():
     except ImportError:
         pass
 
+# Populate aliases if standard keys are not explicitly set
+if not os.getenv("NOTION_TOKEN") and os.getenv("NOTION_API_KEY"):
+    os.environ["NOTION_TOKEN"] = os.environ["NOTION_API_KEY"]
+
+if not os.getenv("NOTION_DATABASE_ID") and os.getenv("NOTION_TASKS_DB_ID"):
+    os.environ["NOTION_DATABASE_ID"] = os.environ["NOTION_TASKS_DB_ID"]
+
 REQUIRED_ENV_VARS = [
     "NOTION_TOKEN",
     "NOTION_DATABASE_ID",
