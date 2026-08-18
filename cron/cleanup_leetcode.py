@@ -38,10 +38,28 @@ def cleanup_expired_leetcode_tasks() -> int:
     if Client is None:
         raise ImportError("notion-client package is required but not installed.")
 
-    notion = Client(auth=api_key)
+    try:
+        notion = Client(auth=api_key, notion_version="2022-06-28")
+    except TypeError:
+        notion = Client(auth=api_key)
+
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     print(f"Searching for expired Leetcode tasks before {today_str}...")
+
+    def _query_db(payload: dict) -> dict:
+        if hasattr(notion, "databases") and hasattr(notion.databases, "query"):
+            return notion.databases.query(**payload)
+        elif hasattr(notion, "request"):
+            db_id = payload.get("database_id", tasks_db_id)
+            body = {k: v for k, v in payload.items() if k != "database_id"}
+            return notion.request(path=f"databases/{db_id}/query", method="POST", body=body)
+        elif hasattr(notion, "data_sources") and hasattr(notion.data_sources, "query"):
+            db_id = payload.get("database_id", tasks_db_id)
+            body = {k: v for k, v in payload.items() if k != "database_id"}
+            return notion.data_sources.query(data_source_id=db_id, **body)
+        else:
+            raise AttributeError("No query endpoint available on notion client")
 
     results = []
     has_more = True
@@ -77,7 +95,7 @@ def cleanup_expired_leetcode_tasks() -> int:
             query_payload["start_cursor"] = start_cursor
 
         try:
-            response = notion.databases.query(**query_payload)
+            response = _query_db(query_payload)
         except Exception as exc:
             # Fallback if property names or filter formats differ
             print(f"Standard filter query encountered an issue ({exc}). Retrying without tag filter...")
@@ -98,7 +116,7 @@ def cleanup_expired_leetcode_tasks() -> int:
                 ]
             }
             try:
-                response = notion.databases.query(**query_payload)
+                response = _query_db(query_payload)
             except Exception as retry_exc:
                 print(f"Database query failed: {retry_exc}", file=sys.stderr)
                 break

@@ -131,3 +131,32 @@ def test_cleanup_page_update_fallback(monkeypatch):
             page_id="task-select-only",
             properties={"Status": {"select": {"name": "Done"}}},
         )
+
+
+def test_cleanup_query_fallback_to_request(monkeypatch):
+    """Test that query falls back to client.request when databases endpoint has no query method."""
+    monkeypatch.setenv("NOTION_API_KEY", "fake_key")
+    monkeypatch.setenv("NOTION_TASKS_DB_ID", "fake_tasks_db")
+
+    class MockDatabasesWithoutQuery:
+        pass
+
+    with patch("cron.cleanup_leetcode.Client") as mock_client_cls:
+        mock_notion = MagicMock()
+        mock_notion.databases = MockDatabasesWithoutQuery()
+        mock_notion.request.return_value = {
+            "results": [{"id": "task-req-1"}],
+            "has_more": False,
+        }
+        mock_notion.pages.update.return_value = {"id": "task-req-1"}
+        mock_client_cls.return_value = mock_notion
+
+        closed_count = cleanup_expired_leetcode_tasks()
+
+        assert closed_count == 1
+        assert mock_notion.request.call_count == 1
+        mock_notion.pages.update.assert_called_once_with(
+            page_id="task-req-1",
+            properties={"Status": {"status": {"name": "Done"}}},
+        )
+
