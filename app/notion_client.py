@@ -773,10 +773,14 @@ class NotionAssistantClient:
         self,
         title: str,
         curriculum_topics: List[str],
+        resources: Optional[List[Any]] = None,
+        starter_tasks: Optional[List[str]] = None,
+        overview: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Creates the Subject page in NOTION_SUBJECTS_DB_ID with Subject title and
 
-        a children array of numbered_list_item blocks for the curriculum.
+        a rich children array of blocks for curriculum topics, direct clickable resource links
+        (with types and summaries), and starter tasks.
         Leaves Completed tasks and % Completed untouched as read-only rollups.
         """
         target_db_id = self.subjects_db_id
@@ -803,24 +807,166 @@ class NotionAssistantClient:
             }
         }
 
-        # Build children array of numbered_list_item blocks directly in payload
+        # Build children array of blocks directly in payload
         children_blocks: List[Dict[str, Any]] = []
-        for topic in curriculum_topics:
-            topic_str = topic.strip()
-            if not topic_str:
-                continue
-            children_blocks.append({
-                "object": "block",
-                "type": "numbered_list_item",
-                "numbered_list_item": {
-                    "rich_text": [
-                        {
-                            "type": "text",
-                            "text": {"content": topic_str}
+
+        # If rich sections (resources or starter_tasks or overview) are provided, build formatted layout
+        if resources or starter_tasks or overview:
+            # 1. Optional Overview Callout
+            if overview:
+                children_blocks.append({
+                    "object": "block",
+                    "type": "callout",
+                    "callout": {
+                        "icon": {"type": "emoji", "emoji": "💡"},
+                        "rich_text": [{"type": "text", "text": {"content": overview.strip()}}]
+                    }
+                })
+
+            # 2. Heading: Curriculum & Key Concepts
+            if curriculum_topics:
+                children_blocks.append({
+                    "object": "block",
+                    "type": "heading_2",
+                    "heading_2": {
+                        "rich_text": [{"type": "text", "text": {"content": "📖 Curriculum & Key Concepts"}}]
+                    }
+                })
+                for topic in curriculum_topics:
+                    topic_str = topic.strip()
+                    if not topic_str:
+                        continue
+                    children_blocks.append({
+                        "object": "block",
+                        "type": "numbered_list_item",
+                        "numbered_list_item": {
+                            "rich_text": [
+                                {
+                                    "type": "text",
+                                    "text": {"content": topic_str}
+                                }
+                            ]
                         }
-                    ]
-                }
-            })
+                    })
+
+            # 3. Heading: Core Resources & Papers (direct clickable links + summaries)
+            if resources:
+                children_blocks.append({
+                    "object": "block",
+                    "type": "divider",
+                    "divider": {}
+                })
+                children_blocks.append({
+                    "object": "block",
+                    "type": "heading_2",
+                    "heading_2": {
+                        "rich_text": [{"type": "text", "text": {"content": "📚 Core Resources & Papers"}}]
+                    }
+                })
+                for res in resources:
+                    res_url = res.get("url") if isinstance(res, dict) else getattr(res, "url", "")
+                    res_name = (
+                        res.get("name") or res.get("title")
+                        if isinstance(res, dict)
+                        else getattr(res, "name", "")
+                    )
+                    res_type = (
+                        res.get("resource_type")
+                        if isinstance(res, dict)
+                        else getattr(res, "resource_type", "Article")
+                    )
+                    res_summary = (
+                        res.get("summary")
+                        if isinstance(res, dict)
+                        else getattr(res, "summary", None)
+                    )
+
+                    if not res_name and res_url:
+                        res_name = res_url
+                    if not res_name:
+                        continue
+
+                    rich_text_elements: List[Dict[str, Any]] = []
+                    if res_type:
+                        rich_text_elements.append({
+                            "type": "text",
+                            "text": {"content": f"[{res_type}] "},
+                            "annotations": {"bold": True, "color": "blue"}
+                        })
+
+                    if res_url:
+                        rich_text_elements.append({
+                            "type": "text",
+                            "text": {"content": res_name, "link": {"url": res_url}},
+                            "annotations": {"bold": True, "underline": True}
+                        })
+                    else:
+                        rich_text_elements.append({
+                            "type": "text",
+                            "text": {"content": res_name},
+                            "annotations": {"bold": True}
+                        })
+
+                    if res_summary:
+                        clean_summary = str(res_summary).strip()
+                        if clean_summary:
+                            rich_text_elements.append({
+                                "type": "text",
+                                "text": {"content": f" — {clean_summary}"}
+                            })
+
+                    children_blocks.append({
+                        "object": "block",
+                        "type": "bulleted_list_item",
+                        "bulleted_list_item": {
+                            "rich_text": rich_text_elements
+                        }
+                    })
+
+            # 4. Heading: Starter Tasks
+            if starter_tasks:
+                children_blocks.append({
+                    "object": "block",
+                    "type": "divider",
+                    "divider": {}
+                })
+                children_blocks.append({
+                    "object": "block",
+                    "type": "heading_2",
+                    "heading_2": {
+                        "rich_text": [{"type": "text", "text": {"content": "🎯 Starter Tasks"}}]
+                    }
+                })
+                for st in starter_tasks:
+                    st_str = st.strip()
+                    if not st_str:
+                        continue
+                    children_blocks.append({
+                        "object": "block",
+                        "type": "to_do",
+                        "to_do": {
+                            "rich_text": [{"type": "text", "text": {"content": st_str}}],
+                            "checked": False
+                        }
+                    })
+        else:
+            # Fallback / simple layout: just numbered list items
+            for topic in curriculum_topics:
+                topic_str = topic.strip()
+                if not topic_str:
+                    continue
+                children_blocks.append({
+                    "object": "block",
+                    "type": "numbered_list_item",
+                    "numbered_list_item": {
+                        "rich_text": [
+                            {
+                                "type": "text",
+                                "text": {"content": topic_str}
+                            }
+                        ]
+                    }
+                })
 
         return self._request_with_retry(
             self.client.pages.create,

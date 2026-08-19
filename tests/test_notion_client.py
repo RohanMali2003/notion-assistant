@@ -597,6 +597,78 @@ def test_create_subject_page_success():
         assert "% Completed" not in create_kwargs["properties"]
 
 
+def test_create_subject_page_with_rich_sections_success():
+    """Test creating a Subject page with rich curriculum, clickable resource links, summaries, and starter tasks."""
+    mock_client_inst = MagicMock()
+    mock_client_inst.databases.retrieve.return_value = {
+        "properties": {
+            "Subject": {"type": "title"},
+            "Completed tasks": {"type": "rollup"},
+            "% Completed": {"type": "rollup"},
+        }
+    }
+    mock_client_inst.pages.create.return_value = {
+        "id": "subj-rich-123",
+        "url": "https://notion.so/subj-rich-123",
+    }
+    mock_client_cls = MagicMock(return_value=mock_client_inst)
+
+    with patch("app.notion_client.Client", mock_client_cls):
+        from app.notion_client import NotionAssistantClient
+        from app.schemas import VerifiedResource
+        client = NotionAssistantClient(
+            token="fake_token",
+            subjects_db_id="subjects_db_123",
+        )
+
+        res = client.create_subject_page(
+            title="Gemini AI & Gemma Architecture",
+            curriculum_topics=[
+                "**Multimodal Tokenization:** Cross-modal integration across vision and text.",
+                "**Decoder Scaling:** Parameter sizing and attention caching.",
+            ],
+            resources=[
+                VerifiedResource(
+                    name="Gemma Technical Report",
+                    url="https://arxiv.org/abs/2403.08295",
+                    resource_type="Paper",
+                    summary="Foundational research paper introducing Gemma open models.",
+                ),
+            ],
+            starter_tasks=[
+                "Read the Gemma technical report abstract",
+                "Clone Gemma repo from GitHub",
+            ],
+            overview="Mastering Google Gemini multimodal foundations and open weights.",
+        )
+
+        assert res["id"] == "subj-rich-123"
+        mock_client_inst.pages.create.assert_called_once()
+        create_kwargs = mock_client_inst.pages.create.call_args[1]
+
+        children = create_kwargs["children"]
+        # Should have callout overview, heading_2 for curriculum, 2 topics, divider, heading_2 for resources, 1 resource with link & summary, divider, heading_2 for tasks, 2 to_dos
+        assert any(b["type"] == "callout" for b in children)
+        assert any(b["type"] == "heading_2" and b["heading_2"]["rich_text"][0]["text"]["content"] == "📚 Core Resources & Papers" for b in children)
+        
+        # Verify resource item structure
+        res_blocks = [b for b in children if b["type"] == "bulleted_list_item"]
+        assert len(res_blocks) == 1
+        res_rich_text = res_blocks[0]["bulleted_list_item"]["rich_text"]
+        # Badge
+        assert "[Paper] " in res_rich_text[0]["text"]["content"]
+        # Hyperlink
+        assert res_rich_text[1]["text"]["content"] == "Gemma Technical Report"
+        assert res_rich_text[1]["text"]["link"]["url"] == "https://arxiv.org/abs/2403.08295"
+        # Summary
+        assert "Foundational research paper" in res_rich_text[2]["text"]["content"]
+
+        # Verify starter tasks
+        todo_blocks = [b for b in children if b["type"] == "to_do"]
+        assert len(todo_blocks) == 2
+        assert todo_blocks[0]["to_do"]["rich_text"][0]["text"]["content"] == "Read the Gemma technical report abstract"
+
+
 def test_create_resource_row_success():
     """Test creating a Resource row in NOTION_RESOURCES_DB_ID with relation to Subject."""
     mock_client_inst = MagicMock()

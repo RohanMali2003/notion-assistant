@@ -129,19 +129,48 @@ GROUNDING_SYSTEM_INSTRUCTION = (
     "You are an expert curriculum designer, research scientist, and educator. Given a topic to study, compile a comprehensive, high-quality study curriculum.\n"
     "Strict requirements:\n"
     "1. Generate a clear, concise, professional SUBJECT TITLE for the topic.\n"
-    "2. Generate a flat, continuous numbered list of 4 to 8 individual curriculum topics (e.g. 1. Topic One\\n2. Topic Two). "
-    "NO section headers, NO grouping or phases, each topic on its own line, built from the ground up.\n"
+    "2. Generate a flat, continuous numbered list of 4 to 8 individual curriculum topics (e.g. 1. **Topic Title:** Detailed explanation of what is covered).\n"
     "3. Identify 1 to 3 concrete, immediately-actionable first steps (starter tasks: what the student should read, code, or do first).\n"
-    "4. In the RESOURCES section, provide 3 to 6 high-quality, canonical learning materials (seminal research papers with ArXiv/DOI URLs, official documentation links, GitHub repos, books, or top tutorials) using markdown links: - [Resource Title](https://...)."
+    "4. In the RESOURCES section, provide 3 to 6 high-quality, canonical learning materials (seminal research papers with ArXiv/DOI URLs, official documentation links, GitHub repos, books, or top tutorials) using markdown links with a 1-sentence summary: - [Resource Title](https://...) — Brief summary of what this resource covers."
 )
 
 
 def _extract_urls_and_titles_from_response(response: Any) -> List[Dict[str, str]]:
-    """Extract surfaced URLs and titles from Gemini response grounding metadata and text."""
+    """Extract surfaced URLs, titles, and summaries from Gemini response text and grounding metadata."""
     resources: List[Dict[str, str]] = []
     seen_urls = set()
 
-    # 1. Extract from grounding metadata chunks
+    # 1. Extract line-by-line from response text to capture title, url, and summary
+    try:
+        text = response.text or ""
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        for line in lines:
+            md_match = re.search(r"\[([^\]]+)\]\((https?://[^\s\)]+)\)(?:\s*[-—:]\s*(.+))?", line)
+            if md_match:
+                title = md_match.group(1).strip()
+                url = md_match.group(2).strip().rstrip(".,;:)")
+                summary = (md_match.group(3) or "").strip()
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    resources.append({"url": url, "title": title, "summary": summary})
+
+        # Fallback regex for any markdown links not caught line-by-line
+        for title, url in re.findall(r"\[([^\]]+)\]\((https?://[^\s\)]+)\)", text):
+            clean_url = url.rstrip(".,;:)")
+            if clean_url and clean_url not in seen_urls:
+                seen_urls.add(clean_url)
+                resources.append({"url": clean_url, "title": title.strip(), "summary": ""})
+
+        # Fallback regex for raw URLs
+        for raw_url in re.findall(r"(https?://[^\s\)\],\"'<>]+)", text):
+            clean_url = raw_url.rstrip(".,;:)")
+            if clean_url and clean_url not in seen_urls:
+                seen_urls.add(clean_url)
+                resources.append({"url": clean_url, "title": "", "summary": ""})
+    except Exception as exc:
+        logger.debug("Could not extract text URLs: %s", exc)
+
+    # 2. Extract from grounding metadata chunks if present
     try:
         if hasattr(response, "candidates") and response.candidates:
             cand = response.candidates[0]
@@ -155,29 +184,9 @@ def _extract_urls_and_titles_from_response(response: Any) -> List[Dict[str, str]
                         title = getattr(web, "title", "") or ""
                         if uri and uri.startswith(("http://", "https://")) and uri not in seen_urls:
                             seen_urls.add(uri)
-                            resources.append({"url": uri, "title": title.strip()})
+                            resources.append({"url": uri, "title": title.strip(), "summary": ""})
     except Exception as exc:
         logger.debug("Could not extract grounding metadata chunks: %s", exc)
-
-    # 2. Extract from response text via regex
-    try:
-        text = response.text or ""
-        # Match markdown links [title](url)
-        md_matches = re.findall(r"\[([^\]]+)\]\((https?://[^\s\)]+)\)", text)
-        for title, url in md_matches:
-            if url not in seen_urls:
-                seen_urls.add(url)
-                resources.append({"url": url, "title": title.strip()})
-
-        # Match raw URLs
-        raw_urls = re.findall(r"(https?://[^\s\)\],\"'<>]+)", text)
-        for url in raw_urls:
-            clean_url = url.rstrip(".,;:)")
-            if clean_url not in seen_urls:
-                seen_urls.add(clean_url)
-                resources.append({"url": clean_url, "title": ""})
-    except Exception as exc:
-        logger.debug("Could not extract text URLs: %s", exc)
 
     return resources
 
@@ -388,6 +397,7 @@ def execute_learning_background_pipeline(
     for res in synthesis.surfaced_resources:
         url = res.get("url", "")
         raw_title = res.get("title", "")
+        summary = res.get("summary", "")
         if not url:
             continue
 
@@ -400,13 +410,14 @@ def execute_learning_background_pipeline(
                     name=display_title,
                     url=url,
                     resource_type=r_type,
+                    summary=summary or None,
                 )
             )
         else:
             dropped_links_count += 1
             logger.info("Dropped invalid resource link: %s (status=%s, err=%s)", url, status_code, err)
 
-    # Step 3a: Create Subject page in NOTION_SUBJECTS_DB_ID
+    # Step 3a: Create Subject page in NOTION_SUBJECTS_DB_ID with rich sections
     subject_page: Optional[Dict[str, Any]] = None
     subject_page_id: Optional[str] = None
     subject_url: Optional[str] = None
@@ -415,6 +426,8 @@ def execute_learning_background_pipeline(
         subject_page = notion.create_subject_page(
             title=subject_title,
             curriculum_topics=synthesis.curriculum_topics,
+            resources=verified_resources,
+            starter_tasks=synthesis.starter_tasks,
         )
         subject_page_id = subject_page.get("id") if isinstance(subject_page, dict) else None
         subject_url = subject_page.get("url") if isinstance(subject_page, dict) else None

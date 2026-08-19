@@ -143,6 +143,10 @@ class VerifiedResource(BaseModel):
         default="Article",
         description="Inferred resource type: Article, Video, Docs, or Paper."
     )
+    summary: Optional[str] = Field(
+        default=None,
+        description="Brief 1-sentence overview of what this resource covers."
+    )
 
 
 class LearningPlanSynthesis(BaseModel):

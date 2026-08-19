@@ -171,6 +171,24 @@ def test_execute_learning_background_pipeline_all_success(mock_compile, mock_ver
             "RPC and Communication",
             "Consensus and Raft Algorithm",
         ],
+        resources=[
+            VerifiedResource(
+                name="Raft Consensus Algorithm Docs",
+                url="https://raft.github.io/docs/",
+                resource_type="Docs",
+                summary=None,
+            ),
+            VerifiedResource(
+                name="Raft Explained Video",
+                url="https://youtube.com/watch?v=v1",
+                resource_type="Video",
+                summary=None,
+            ),
+        ],
+        starter_tasks=[
+            "Read Diego Ongaro's Raft Paper",
+            "Run a local 3-node Raft simulation",
+        ],
     )
     # 2. create_resource_row linked to subject page id
     assert mock_notion.create_resource_row.call_count == 2
