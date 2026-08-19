@@ -12,7 +12,7 @@ def test_config_fail_fast_missing_vars():
         "TELEGRAM_BOT_TOKEN": "",
         "TELEGRAM_CHAT_ID": "",
     }
-    with patch.dict(os.environ, env_clean, clear=True):
+    with patch("pathlib.Path.is_file", return_value=False), patch.dict(os.environ, env_clean, clear=True):
         if "app.config" in sys.modules:
             del sys.modules["app.config"]
         
