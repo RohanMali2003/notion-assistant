@@ -126,13 +126,13 @@ def infer_resource_type(url: str, title: str = "") -> ResourceTypeLiteral:
 # --- Step 1: Gemini Grounding Curriculum Compiler ---
 
 GROUNDING_SYSTEM_INSTRUCTION = (
-    "You are an expert curriculum designer and educator. Given a topic to study, compile a comprehensive, novice-friendly study curriculum.\n"
+    "You are an expert curriculum designer, research scientist, and educator. Given a topic to study, compile a comprehensive, high-quality study curriculum.\n"
     "Strict requirements:\n"
-    "1. Generate a clear, concise SUBJECT TITLE for the topic.\n"
-    "2. Generate a flat, continuous numbered list of individual curriculum topics (e.g. 1. Topic One\\n2. Topic Two\\n3. Topic Three). "
-    "NO section headers, NO grouping or phases, each topic on its own line, novice-level framing throughout, built from the ground up, with NO corporate-style framing.\n"
-    "3. Identify 1 to 3 concrete, immediately-actionable first steps (starter tasks: what the student should do first, not the whole curriculum).\n"
-    "4. Search the web using grounding to find high-quality learning resources (official documentation, books, key articles, videos, foundational papers) and include their URLs."
+    "1. Generate a clear, concise, professional SUBJECT TITLE for the topic.\n"
+    "2. Generate a flat, continuous numbered list of 4 to 8 individual curriculum topics (e.g. 1. Topic One\\n2. Topic Two). "
+    "NO section headers, NO grouping or phases, each topic on its own line, built from the ground up.\n"
+    "3. Identify 1 to 3 concrete, immediately-actionable first steps (starter tasks: what the student should read, code, or do first).\n"
+    "4. In the RESOURCES section, provide 3 to 6 high-quality, canonical learning materials (seminal research papers with ArXiv/DOI URLs, official documentation links, GitHub repos, books, or top tutorials) using markdown links: - [Resource Title](https://...)."
 )
 
 
@@ -191,25 +191,41 @@ def _parse_curriculum_text(text: str, fallback_topic: str) -> Tuple[str, List[st
     lines = [line.strip() for line in text.split("\n") if line.strip()]
 
     in_starter_tasks = False
+    in_resources = False
 
     for line in lines:
         lower = line.lower()
-        if "starter task" in lower or "first step" in lower or "what to do first" in lower or "actionable task" in lower:
-            in_starter_tasks = True
-            continue
+        # Section header detection (must NOT be a numbered item or bullet)
+        if not re.match(r"^\d+[\.\)]", line) and not line.startswith(("- ", "* ")):
+            if any(k in lower for k in ("resource", "reference", "reading", "paper", "material", "link")):
+                in_starter_tasks = False
+                in_resources = True
+                continue
+
+            if "starter task" in lower or "first step" in lower or "what to do first" in lower or "actionable task" in lower:
+                in_starter_tasks = True
+                in_resources = False
+                continue
+
+            if "curriculum topic" in lower or "topics to cover" in lower or "syllabus" in lower:
+                in_starter_tasks = False
+                in_resources = False
+                continue
 
         if "subject title:" in lower:
             subject_title = re.sub(r"(?i)^#*\s*subject title:\s*", "", line).strip().strip('"*')
             continue
-        elif line.startswith("# ") and not curriculum_topics and not in_starter_tasks:
+        elif line.startswith("# ") and not curriculum_topics and not in_starter_tasks and not in_resources:
             subject_title = line.lstrip("# ").strip().strip('"*')
+            continue
+
+        if in_resources:
             continue
 
         # Match numbered list item e.g. "1. Topic Name" or "1) Topic Name"
         num_match = re.match(r"^\d+[\.\)]\s*(.+)$", line)
         if num_match:
             item_text = num_match.group(1).strip().strip("*_")
-            # Remove any trailing parenthetical tags
             if in_starter_tasks:
                 starter_tasks.append(item_text)
             else:
@@ -219,7 +235,6 @@ def _parse_curriculum_text(text: str, fallback_topic: str) -> Tuple[str, List[st
             if in_starter_tasks:
                 starter_tasks.append(bullet_text)
             elif not curriculum_topics:
-                # If not inside starter tasks and no numbered items yet, treat as topic
                 curriculum_topics.append(bullet_text)
 
     # Fallback if no numbered topics extracted
@@ -242,35 +257,35 @@ def _parse_curriculum_text(text: str, fallback_topic: str) -> Tuple[str, List[st
 
 
 def compile_learning_curriculum(learning_req: LearningRequest) -> LearningPlanSynthesis:
-    """Compile curriculum using Gemini web search grounding.
-
-    Generates subject title, flat numbered curriculum list (novice framing, no headers),
-    starter tasks, and surfaces reference URLs.
-    """
+    """Compile curriculum using Gemini with knowledge synthesis and search grounding fallback."""
     topic = learning_req.topic or "Computer Science Foundations"
     prompt = (
-        f"Create a beginner-friendly study curriculum for: {topic}\n"
-        f"Domain/Category: {learning_req.category or 'General'}\n"
-        f"Goal: {learning_req.goal or 'Build a solid novice-to-intermediate understanding'}\n"
-        f"Proficiency Level: {learning_req.proficiency_level or 'Novice'}\n"
-        f"Requested Materials: {learning_req.resources_requested or 'Best free documentation, tutorials, papers'}\n\n"
-        "Provide:\n"
+        f"Create a comprehensive study curriculum and gather foundational resources for: {topic}\n"
+        f"Domain/Category: {learning_req.category or 'Computer Science / AI'}\n"
+        f"Goal: {learning_req.goal or 'Master foundational concepts and seminal papers'}\n"
+        f"Proficiency Level: {learning_req.proficiency_level or 'Novice to Advanced'}\n"
+        f"Requested Materials: {learning_req.resources_requested or 'Seminal papers, official documentation, tutorials'}\n\n"
+        "Provide your output formatted exactly as:\n"
         "SUBJECT TITLE: <A concise title for the subject>\n\n"
         "CURRICULUM TOPICS:\n"
         "1. <Topic 1>\n"
         "2. <Topic 2>\n"
-        "3. <Topic 3>\n"
-        "(A flat continuous numbered list of 5-10 individual topics, each on its own line, built from the ground up, no headers, no groupings)\n\n"
+        "3. <Topic 3>\n\n"
         "STARTER TASKS:\n"
         "1. <Concrete immediately-actionable first step>\n"
-        "2. <Second actionable first step>\n"
+        "2. <Second actionable first step>\n\n"
+        "RESOURCES:\n"
+        "- [Canonical Paper / Resource 1](https://...)\n"
+        "- [Official Docs / Resource 2](https://...)\n"
+        "- [Tutorial / GitHub Repo 3](https://...)\n"
     )
 
     client = get_gemini_client()
     model_name = get_gemini_model()
+    response = None
 
+    # 1. Attempt with Search Grounding if configured
     try:
-        # Search grounding tool config with client-side AFC disabled (handled server-side by Google)
         afc_config = (
             types.AutomaticFunctionCallingConfig(disable=True)
             if hasattr(types, "AutomaticFunctionCallingConfig")
@@ -282,13 +297,34 @@ def compile_learning_curriculum(learning_req: LearningRequest) -> LearningPlanSy
             automatic_function_calling=afc_config,
             temperature=0.2,
         )
-
         response = client.models.generate_content(
             model=model_name,
             contents=prompt,
             config=config,
         )
+    except Exception as ground_err:
+        logger.warning(
+            "Search grounding tool call failed (%s). Falling back to direct Gemini knowledge synthesis.",
+            ground_err,
+        )
 
+    # 2. If search grounding failed or was skipped, call direct Gemini model
+    if response is None or not (response.text or "").strip():
+        try:
+            config_direct = types.GenerateContentConfig(
+                system_instruction=GROUNDING_SYSTEM_INSTRUCTION,
+                automatic_function_calling=afc_config,
+                temperature=0.2,
+            )
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=config_direct,
+            )
+        except Exception as direct_err:
+            logger.error("Direct Gemini curriculum generation failed: %s", direct_err)
+
+    if response and (response.text or "").strip():
         text_content = response.text or ""
         surfaced_resources = _extract_urls_and_titles_from_response(response)
         subj_title, topics, starter_tasks = _parse_curriculum_text(text_content, topic)
@@ -299,23 +335,23 @@ def compile_learning_curriculum(learning_req: LearningRequest) -> LearningPlanSy
             starter_tasks=starter_tasks,
             surfaced_resources=surfaced_resources,
         )
-    except Exception as exc:
-        logger.error("Gemini search grounding compilation failed (%s). Using fallback synthesis.", exc)
-        return LearningPlanSynthesis(
-            subject_title=f"{topic} Fundamentals",
-            curriculum_topics=[
-                f"Introduction to {topic}",
-                f"Basic Concepts and Fundamentals",
-                f"Core Mechanics and Operations",
-                f"Practical Exercises and Building",
-                f"Next Steps and Advanced Concepts",
-            ],
-            starter_tasks=[
-                f"Set up study workspace for {topic}",
-                f"Review foundational documentation for {topic}",
-            ],
-            surfaced_resources=[],
-        )
+
+    logger.error("All Gemini API attempts failed. Using static fallback synthesis.")
+    return LearningPlanSynthesis(
+        subject_title=f"{topic} Fundamentals",
+        curriculum_topics=[
+            f"Introduction to {topic}",
+            f"Basic Concepts and Fundamentals",
+            f"Core Mechanics and Operations",
+            f"Practical Exercises and Building",
+            f"Next Steps and Advanced Concepts",
+        ],
+        starter_tasks=[
+            f"Set up study workspace for {topic}",
+            f"Review foundational documentation for {topic}",
+        ],
+        surfaced_resources=[],
+    )
 
 
 # --- Step 3 & 4: Background Pipeline Orchestrator ---
