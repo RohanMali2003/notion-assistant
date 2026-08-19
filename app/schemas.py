@@ -50,6 +50,11 @@ class TaskAnalysis(BaseModel):
     log_content: Optional[str] = None
     target_status: Optional[Literal["In progress", "Done", "Not started"]] = None
     new_due_date: Optional[str] = None
+    priority_filter: Optional[Literal["High", "Medium", "Low"]] = None
+    tag_filter: Optional[str] = None
+    offset: int = 0
+    limit: int = 5
+    is_followup: bool = False
 
 
 # Alias for backward compatibility

@@ -14,6 +14,7 @@ except ImportError:
 from app.config import settings
 from app.learning_service import execute_learning_background_pipeline
 from app.leetcode_service import execute_leetcode_background_pipeline
+from app.memory import conversation_memory
 from app.notion_client import NotionAssistantClient
 from app.schemas import (
     LearningRequest,
@@ -56,22 +57,23 @@ def get_gemini_model() -> str:
 
 STAGE1_SYSTEM_INSTRUCTION = (
     "You are a lightweight intent routing classifier. Classify the user's message into exactly one MODULE:\n"
-    "- TASKS: Creating or querying tasks, managing to-do items, updating task status, checking today's or pending tasks.\n"
-    "- MIND: Substack drafts, journaling, brain dumps, rambling, daily reflections/logs, personal thoughts.\n"
+    "- TASKS: Creating or querying tasks, managing to-do items, updating task status, checking today's or pending tasks, priority queries (e.g. 'high priority tasks'), and conversational follow-ups (e.g. 'others?', 'show more', 'next', 'what else?').\n"
+    "- MIND: Substack drafts, journaling, brain dumps, rambling, daily reflections/logs, personal thoughts. NOTE: Short conversational follow-up questions (e.g. 'others?', 'what about tomorrow?') are NOT Mind entries; they belong to TASKS.\n"
     "- LEARNING: New study topic requests, learning roadmaps, syllabus inquiries, concept exploration.\n"
     "- LEETCODE: LeetCode problem review requests, algorithm practice notes, problem solution tracking.\n"
     "Pass the raw user message into the raw_text field."
 )
 
 
-def classify_module_stage1(text: str) -> ModuleClassification:
+def classify_module_stage1(text: str, context: Optional[str] = None) -> ModuleClassification:
     """Stage 1: Classify user message into target functional module using gemini-3.5-flash-lite."""
     try:
         client = get_gemini_client()
         model_name = get_gemini_model()
+        prompt_content = f"Recent conversation context:\n{context}\n\nUser message: {text}" if context else text
         response = client.models.generate_content(
             model=model_name,
-            contents=text,
+            contents=prompt_content,
             config=types.GenerateContentConfig(
                 system_instruction=STAGE1_SYSTEM_INSTRUCTION,
                 response_mime_type="application/json",
@@ -105,19 +107,20 @@ STAGE2_TASKS_INSTRUCTION = (
     "- CREATE_TASK: Adding a new task, with optional priority (High/Medium/Low), tag, due_date (YYYY-MM-DD), description.\n"
     "- UPDATE_TASK: Updating status of an existing task (In progress/Done/Not started) or due date.\n"
     "- QUERY_TODAY: Querying tasks due today.\n"
-    "- QUERY_PENDING: Querying pending or upcoming tasks.\n"
+    "- QUERY_PENDING: Querying pending or upcoming tasks. If user asks for high/medium/low priority (e.g. 'high priority tasks', 'urgent tasks'), set priority_filter='High' (or Medium/Low). If user asks 'others?', 'more', 'next', 'what else?', set is_followup=True and intent='QUERY_PENDING'.\n"
     "- DAILY_LOG: Recording daily notes or log entry."
 )
 
 
-def parse_tasks_stage2(text: str) -> TaskAnalysis:
+def parse_tasks_stage2(text: str, context: Optional[str] = None) -> TaskAnalysis:
     """Stage 2: Parse TASKS module intent and task structure using gemini-3.5-flash-lite."""
     try:
         client = get_gemini_client()
         model_name = get_gemini_model()
+        prompt_content = f"Recent conversation context:\n{context}\n\nUser message: {text}" if context else text
         response = client.models.generate_content(
             model=model_name,
-            contents=text,
+            contents=prompt_content,
             config=types.GenerateContentConfig(
                 system_instruction=STAGE2_TASKS_INSTRUCTION,
                 response_mime_type="application/json",
@@ -287,14 +290,34 @@ def parse_leetcode_stage2(text: str) -> LeetcodeReviewRequest:
 
 def analyze_user_text_two_stage(
     text: str,
+    context: Optional[str] = None,
 ) -> Tuple[str, Union[TaskAnalysis, MindEntry, LearningRequest, LeetcodeReviewRequest]]:
     """Execute two-stage Gemini pipeline: Stage 1 classification -> Stage 2 module-specific parsing."""
-    stage1_res = classify_module_stage1(text)
+    if context:
+        stage1_res = classify_module_stage1(text, context=context)
+    else:
+        stage1_res = classify_module_stage1(text)
+
     module = stage1_res.module
     raw_text = stage1_res.raw_text or text
 
+    # Anti-rambling guardrail: Short ambiguous queries (<= 4 words) ending with '?' or conversational follow-up words
+    # must never be categorized as MIND entries unless explicit journaling keywords are present.
+    text_lower = text.strip().lower()
+    explicit_mind_keywords = ("substack", "rambling", "brain dump", "daily log", "journal", "feeling", "thought:", "reflection:")
+    is_short_query = (
+        len(text.strip().split()) <= 4
+        and (
+            text_lower.endswith("?")
+            or text_lower in ("others", "others?", "more", "next", "what else", "what else?", "show more", "and?", "next page")
+        )
+    )
+    if module == "MIND" and is_short_query and not any(kw in text_lower for kw in explicit_mind_keywords):
+        logger.info("Anti-rambling guardrail redirected short query '%s' to TASKS", text)
+        module = "TASKS"
+
     if module == "TASKS":
-        parsed = parse_tasks_stage2(raw_text)
+        parsed = parse_tasks_stage2(raw_text, context=context) if context else parse_tasks_stage2(raw_text)
     elif module == "MIND":
         parsed = parse_mind_stage2(raw_text)
     elif module == "LEARNING":
@@ -302,7 +325,7 @@ def analyze_user_text_two_stage(
     elif module == "LEETCODE":
         parsed = parse_leetcode_stage2(raw_text)
     else:
-        parsed = parse_tasks_stage2(raw_text)
+        parsed = parse_tasks_stage2(raw_text, context=context) if context else parse_tasks_stage2(raw_text)
 
     return module, parsed
 
@@ -368,6 +391,7 @@ async def _handle_module_action(
     parsed_result: Any,
     text: str,
     notion_client: NotionAssistantClient,
+    sender_id: Optional[str] = None,
 ) -> str:
     """Execute standard synchronous actions for TASKS, MIND, and LEETCODE modules."""
     if module == "TASKS":
@@ -397,6 +421,9 @@ async def _handle_module_action(
                 reply_text += f"\n⚡ Priority: {parsed_task.priority}"
             if parsed_task.tag:
                 reply_text += f"\n🏷 Tag: {parsed_task.tag}"
+
+            if sender_id:
+                conversation_memory.update_query_state(sender_id, last_module="TASKS", last_intent="CREATE_TASK")
             return reply_text
 
         elif intent == "UPDATE_TASK":
@@ -421,11 +448,38 @@ async def _handle_module_action(
                     reply_text += f"\n📅 Due: {parsed_task.new_due_date or parsed_task.due_date}"
             else:
                 reply_text = f"⚠️ Could not find an active task matching: *{title_query}*"
+
+            if sender_id:
+                conversation_memory.update_query_state(sender_id, last_module="TASKS", last_intent="UPDATE_TASK")
             return reply_text
 
         elif intent == "QUERY_TODAY":
-            today_items = await run_in_threadpool(notion_client.get_today_tasks)
+            last_state = conversation_memory.get_last_query_state(sender_id) if sender_id else {}
+            p_filter = parsed_task.priority_filter or (last_state.get("priority_filter") if parsed_task.is_followup else None)
+            t_filter = parsed_task.tag_filter or (last_state.get("tag_filter") if parsed_task.is_followup else None)
+
+            today_items = await run_in_threadpool(
+                notion_client.get_today_tasks,
+                priority=p_filter,
+                tag=t_filter,
+            )
+
+            if sender_id:
+                conversation_memory.update_query_state(
+                    sender_id,
+                    last_module="TASKS",
+                    last_intent="QUERY_TODAY",
+                    priority_filter=p_filter,
+                    tag_filter=t_filter,
+                    last_offset=0,
+                )
+
             if today_items:
+                header = "📅 *Today's Tasks"
+                if p_filter:
+                    header += f" ({p_filter} Priority)"
+                header += f" ({len(today_items)}):*"
+
                 tasks_lines = []
                 for item in today_items:
                     item_title = getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else str(item))
@@ -443,13 +497,59 @@ async def _handle_module_action(
                         line += f"\n  🔗 {item_url}"
                     tasks_lines.append(line)
                 tasks_str = "\n".join(tasks_lines)
-                return f"📅 *Today's Tasks ({len(today_items)}):*\n{tasks_str}"
+                return f"{header}\n{tasks_str}"
             else:
+                if p_filter:
+                    return f"🎉 No {p_filter} priority tasks due today!"
                 return "🎉 No tasks due today!"
 
         elif intent == "QUERY_PENDING":
-            pending_items = await run_in_threadpool(notion_client.get_pending, limit=5)
+            last_state = conversation_memory.get_last_query_state(sender_id) if sender_id else {}
+            text_clean = text.strip().lower()
+            is_followup_word = text_clean in ("others", "others?", "more", "next", "what else", "what else?", "show more", "next page")
+
+            if parsed_task.is_followup or is_followup_word:
+                p_filter = parsed_task.priority_filter or last_state.get("priority_filter")
+                t_filter = parsed_task.tag_filter or last_state.get("tag_filter")
+                offset = last_state.get("last_offset", 0) + 5
+            else:
+                p_filter = parsed_task.priority_filter
+                t_filter = parsed_task.tag_filter
+                offset = parsed_task.offset or 0
+
+            if p_filter or t_filter or offset > 0:
+                pending_items = await run_in_threadpool(
+                    notion_client.get_pending,
+                    limit=5,
+                    offset=offset,
+                    priority=p_filter,
+                    tag=t_filter,
+                )
+            else:
+                pending_items = await run_in_threadpool(
+                    notion_client.get_pending,
+                    limit=5,
+                )
+
+            if sender_id:
+                conversation_memory.update_query_state(
+                    sender_id,
+                    last_module="TASKS",
+                    last_intent="QUERY_PENDING",
+                    priority_filter=p_filter,
+                    tag_filter=t_filter,
+                    last_offset=offset,
+                )
+
             if pending_items:
+                header = "📋 *Pending Tasks"
+                if p_filter:
+                    header += f" ({p_filter} Priority)"
+                if offset > 0:
+                    header += f" (Items {offset + 1}-{offset + len(pending_items)}):*"
+                else:
+                    header += f" ({len(pending_items)}):*"
+
                 tasks_lines = []
                 for item in pending_items:
                     item_title = getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else str(item))
@@ -467,12 +567,19 @@ async def _handle_module_action(
                         line += f"\n  🔗 {item_url}"
                     tasks_lines.append(line)
                 tasks_str = "\n".join(tasks_lines)
-                return f"📋 *Pending Tasks ({len(pending_items)}):*\n{tasks_str}"
+                return f"{header}\n{tasks_str}"
             else:
-                return "🎉 No pending tasks found!"
+                if offset > 0:
+                    return f"🎉 No more {p_filter or ''} pending tasks found!".replace("  ", " ")
+                elif p_filter:
+                    return f"🎉 No {p_filter} priority pending tasks found!"
+                else:
+                    return "🎉 No pending tasks found!"
 
         else:  # DAILY_LOG or fallback
             log_content = parsed_task.log_content or text
+            if sender_id:
+                conversation_memory.update_query_state(sender_id, last_module="TASKS", last_intent="DAILY_LOG")
             return f"📝 *Daily Log Recorded:*\n{log_content}"
 
     elif module == "MIND":
@@ -509,6 +616,9 @@ async def _handle_module_action(
             reply_text += f"\n📌 *Summary:* {mind_entry.summary}"
         if mind_entry.tags:
             reply_text += f"\n🏷 Tags: {', '.join(mind_entry.tags)}"
+
+        if sender_id:
+            conversation_memory.update_query_state(sender_id, last_module="MIND", last_intent=entry_sub_intent)
         return reply_text
 
     elif module == "LEETCODE":
@@ -523,6 +633,9 @@ async def _handle_module_action(
             reply_text += f"\n📊 Status: {lc_req.status}"
         if lc_req.review_notes:
             reply_text += f"\n📝 Notes: {lc_req.review_notes}"
+
+        if sender_id:
+            conversation_memory.update_query_state(sender_id, last_module="LEETCODE", last_intent="REVIEW")
         return reply_text
 
     else:
@@ -547,8 +660,12 @@ async def whatsapp_webhook(
         logger.info("WhatsApp webhook received non-message or empty event.")
         return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
 
-    # Two-Stage Gemini Classification & Parsing
-    module, parsed_result = await run_in_threadpool(analyze_user_text_two_stage, text)
+    # 1. Add user message to conversation memory & get rolling context
+    conversation_memory.add_user_message(sender_phone, text)
+    context = conversation_memory.format_context_prompt(sender_phone, max_turns=4)
+
+    # 2. Two-Stage Gemini Classification & Parsing with Context
+    module, parsed_result = await run_in_threadpool(analyze_user_text_two_stage, text, context=context)
 
     whatsapp_client = WhatsAppAssistantClient()
     notion_client = NotionAssistantClient()
@@ -561,6 +678,7 @@ async def whatsapp_webhook(
                 to=sender_phone,
                 text="Building your study plan...",
             )
+            conversation_memory.add_assistant_message(sender_phone, "Building your study plan...", module="LEARNING")
         except Exception as wa_err:
             logger.error("Failed to send WhatsApp learning ack: %s", wa_err)
 
@@ -571,7 +689,6 @@ async def whatsapp_webhook(
             to_phone=sender_phone,
         )
 
-        # Return 200 immediately to WhatsApp webhook
         return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
 
     if module == "LEETCODE":
@@ -582,6 +699,7 @@ async def whatsapp_webhook(
                 to=sender_phone,
                 text="Pulling your latest solution...",
             )
+            conversation_memory.add_assistant_message(sender_phone, "Pulling your latest solution...", module="LEETCODE")
         except Exception as wa_err:
             logger.error("Failed to send WhatsApp leetcode ack: %s", wa_err)
 
@@ -592,18 +710,18 @@ async def whatsapp_webhook(
             to_phone=sender_phone,
         )
 
-        # Return 200 immediately to WhatsApp webhook
         return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
 
     # For other modules (TASKS, MIND)
     try:
-        reply_text = await _handle_module_action(module, parsed_result, text, notion_client)
+        reply_text = await _handle_module_action(module, parsed_result, text, notion_client, sender_id=sender_phone)
         if reply_text:
             await run_in_threadpool(
                 whatsapp_client.send_message,
                 to=sender_phone,
                 text=reply_text,
             )
+            conversation_memory.add_assistant_message(sender_phone, reply_text, module=module)
     except Exception as exc:
         logger.error("Failed to process WhatsApp message: %s", exc)
 
@@ -635,9 +753,14 @@ async def telegram_webhook(
 
     text = update.message.get("text")
     chat_id = update.message.get("chat", {}).get("id")
+    sender_id = str(chat_id) if chat_id else "unknown_tg"
 
-    # 3 & 4. Two-Stage Gemini Classification and Parsing
-    module, parsed_result = await run_in_threadpool(analyze_user_text_two_stage, text)
+    # 1. Add user message to conversation memory & get rolling context
+    conversation_memory.add_user_message(sender_id, text)
+    context = conversation_memory.format_context_prompt(sender_id, max_turns=4)
+
+    # 3 & 4. Two-Stage Gemini Classification and Parsing with Context
+    module, parsed_result = await run_in_threadpool(analyze_user_text_two_stage, text, context=context)
 
     notion_client = NotionAssistantClient()
     telegram_client = TelegramAssistantClient()
@@ -651,6 +774,7 @@ async def telegram_webhook(
                     text="Building your study plan...",
                     chat_id=str(chat_id),
                 )
+                conversation_memory.add_assistant_message(sender_id, "Building your study plan...", module="LEARNING")
             except Exception as tg_err:
                 logger.error("Failed to send Telegram learning ack: %s", tg_err)
 
@@ -670,6 +794,7 @@ async def telegram_webhook(
                     text="Pulling your latest solution...",
                     chat_id=str(chat_id),
                 )
+                conversation_memory.add_assistant_message(sender_id, "Pulling your latest solution...", module="LEETCODE")
             except Exception as tg_err:
                 logger.error("Failed to send Telegram leetcode ack: %s", tg_err)
 
@@ -682,7 +807,7 @@ async def telegram_webhook(
 
     # 5. Route other modules to appropriate synchronous action
     try:
-        reply_text = await _handle_module_action(module, parsed_result, text, notion_client)
+        reply_text = await _handle_module_action(module, parsed_result, text, notion_client, sender_id=sender_id)
 
         if chat_id and reply_text:
             try:
@@ -691,6 +816,7 @@ async def telegram_webhook(
                     text=reply_text,
                     chat_id=str(chat_id)
                 )
+                conversation_memory.add_assistant_message(sender_id, reply_text, module=module)
             except Exception as tg_err:
                 logger.error("Failed to send message to Telegram chat_id=%s: %s", chat_id, tg_err)
 

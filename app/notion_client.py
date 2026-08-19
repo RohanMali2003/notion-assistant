@@ -537,35 +537,87 @@ class NotionAssistantClient:
         else:
             raise AttributeError("Installed notion-client has no endpoint for querying database")
 
-    def get_pending(self, limit: int = 5) -> List[TaskDict]:
-        """Queries DB where Status != Done, sorted by Due date ascending (nulls last)."""
+    def get_pending(
+        self,
+        limit: int = 5,
+        offset: int = 0,
+        priority: Optional[str] = None,
+        tag: Optional[str] = None,
+    ) -> List[TaskDict]:
+        """Queries DB where Status != Done, optionally filtered by priority and tag, sorted by Due date ascending."""
         if self.client is None:
             return []
 
-        response = self._query_database(
-            database_id=self.database_id,
-            page_size=limit,
-            filter={
+        if not priority and not tag and offset == 0:
+            fetch_size = limit
+        else:
+            fetch_size = max(100, offset + limit)
+
+        filter_conditions: List[Dict[str, Any]] = [
+            {
                 "property": "Status",
                 "status": {
                     "does_not_equal": "Done"
                 }
-            },
-            sorts=[
-                {
-                    "property": "Due date",
-                    "direction": "ascending"
+            }
+        ]
+
+        if priority:
+            filter_conditions.append({
+                "property": "Priority",
+                "select": {
+                    "equals": priority.capitalize()
                 }
-            ]
-        )
+            })
+
+        query_filter: Dict[str, Any]
+        if len(filter_conditions) == 1:
+            query_filter = filter_conditions[0]
+        else:
+            query_filter = {"and": filter_conditions}
+
+        try:
+            response = self._query_database(
+                database_id=self.database_id,
+                page_size=min(fetch_size, 100),
+                filter=query_filter,
+                sorts=[
+                    {
+                        "property": "Due date",
+                        "direction": "ascending"
+                    }
+                ]
+            )
+        except Exception as exc:
+            logger.warning(f"Filtered Notion query failed ({exc}), falling back to unfiltered status query")
+            response = self._query_database(
+                database_id=self.database_id,
+                page_size=min(fetch_size, 100),
+                filter={
+                    "property": "Status",
+                    "status": {
+                        "does_not_equal": "Done"
+                    }
+                },
+                sorts=[
+                    {
+                        "property": "Due date",
+                        "direction": "ascending"
+                    }
+                ]
+            )
 
         tasks: List[TaskDict] = []
         for page in response.get("results", []):
             task = self._parse_page_to_dict(page)
+            if priority and str(task.get("priority", "")).strip().lower() != priority.strip().lower():
+                continue
+            if tag and str(task.get("tag", "")).strip().lower() != tag.strip().lower():
+                continue
             tasks.append(task)
 
         tasks.sort(key=lambda x: (x["due_date"] is None, x["due_date"] or ""))
-        return tasks[:limit]
+        return tasks[offset : offset + limit]
 
     def get_reminder_candidates(self) -> Tuple[List[TaskDict], List[TaskDict]]:
         """Returns two lists of task dicts with Status != Done:
@@ -652,16 +704,22 @@ class NotionAssistantClient:
             }
         )
 
-    def get_today_tasks(self) -> List[TaskDict]:
+    def get_today_tasks(
+        self,
+        priority: Optional[str] = None,
+        tag: Optional[str] = None,
+        offset: int = 0,
+        limit: int = 10,
+    ) -> List[TaskDict]:
         """Fetch tasks where Due date matches today's date."""
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        all_pending = self.get_pending(limit=100)
+        all_pending = self.get_pending(limit=100, offset=0, priority=priority, tag=tag)
         today_tasks: List[TaskDict] = []
         for task in all_pending:
             due = task.get("due_date")
             if due and due.startswith(today_str):
                 today_tasks.append(task)
-        return today_tasks
+        return today_tasks[offset : offset + limit]
 
     def update_task_status(
         self,
