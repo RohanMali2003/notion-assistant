@@ -270,10 +270,16 @@ def compile_learning_curriculum(learning_req: LearningRequest) -> LearningPlanSy
     model_name = get_gemini_model()
 
     try:
-        # Search grounding tool config
+        # Search grounding tool config with client-side AFC disabled (handled server-side by Google)
+        afc_config = (
+            types.AutomaticFunctionCallingConfig(disable=True)
+            if hasattr(types, "AutomaticFunctionCallingConfig")
+            else None
+        )
         config = types.GenerateContentConfig(
             system_instruction=GROUNDING_SYSTEM_INSTRUCTION,
             tools=[types.Tool(google_search=types.GoogleSearch())],
+            automatic_function_calling=afc_config,
             temperature=0.2,
         )
 
