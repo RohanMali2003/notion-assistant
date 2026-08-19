@@ -1,0 +1,24 @@
+name: Keep Render Service Awake
+
+on:
+  schedule:
+    # Run every 12 minutes to prevent Render free-tier from sleeping (15 min inactivity timeout)
+    - cron: '*/12 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping-render:
+    name: Ping Health Endpoint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Ping Notion Assistant Health Check
+        run: |
+          echo "Pinging Render health endpoint to keep instance warm..."
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 https://notion-assistant-g687.onrender.com/health || echo "FAILED")
+          echo "Response HTTP Status: $HTTP_STATUS"
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "✅ Render instance is awake and healthy."
+          else
+            echo "⚠️ Render instance ping returned: $HTTP_STATUS (Cold start or waking up)"
+          fi
