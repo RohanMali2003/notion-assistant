@@ -17,6 +17,12 @@ if not os.getenv("NOTION_TOKEN") and os.getenv("NOTION_API_KEY"):
 if not os.getenv("NOTION_DATABASE_ID") and os.getenv("NOTION_TASKS_DB_ID"):
     os.environ["NOTION_DATABASE_ID"] = os.environ["NOTION_TASKS_DB_ID"]
 
+if not os.getenv("WHATSAPP_TOKEN") and os.getenv("WHATSAPP_ACCESS_TOKEN"):
+    os.environ["WHATSAPP_TOKEN"] = os.environ["WHATSAPP_ACCESS_TOKEN"]
+
+if not os.getenv("WHATSAPP_PHONE_NUMBER_ID") and os.getenv("WHATSAPP_PHONE_ID"):
+    os.environ["WHATSAPP_PHONE_NUMBER_ID"] = os.environ["WHATSAPP_PHONE_ID"]
+
 REQUIRED_ENV_VARS = [
     "NOTION_TOKEN",
     "NOTION_DATABASE_ID",
