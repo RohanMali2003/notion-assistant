@@ -48,3 +48,17 @@ jobs:
         run: |
           python cron/cleanup_leetcode.py
 
+      - name: Run Notion Duplicate Cleanup Audit
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN || secrets.NOTION_API_KEY }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY || secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID || secrets.NOTION_TASKS_DB_ID }}
+          NOTION_TASKS_DB_ID: ${{ secrets.NOTION_TASKS_DB_ID || secrets.NOTION_DATABASE_ID }}
+          NOTION_SUBJECTS_DB_ID: ${{ secrets.NOTION_SUBJECTS_DB_ID }}
+          NOTION_RESOURCES_DB_ID: ${{ secrets.NOTION_RESOURCES_DB_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          APP_ENV: production
+        run: |
+          python cron/find_duplicates.py
+
