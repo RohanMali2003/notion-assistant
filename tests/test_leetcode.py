@@ -442,3 +442,25 @@ def test_execute_leetcode_background_pipeline_github_error(mock_fetch_commit):
     assert "Failed to pull solution from GitHub" in mock_wa.send_message.call_args[1]["text"]
     mock_tg.send_message.assert_called_once()
     assert "Failed to pull solution from GitHub" in mock_tg.send_message.call_args[1]["text"]
+
+
+def test_clean_math_and_markdown():
+    from app.leetcode_service import clean_math_and_markdown
+
+    raw_text = "⏱️ Time: $O(K)$, where $K$ is the number of seats. | 💾 Space: $O(K)$, stored in $unordered_map$ with $n = 10^9$. **Logic**: Tested."
+    
+    # WhatsApp cleaning
+    wa_cleaned = clean_math_and_markdown(raw_text, for_whatsapp=True)
+    assert "$O(K)$" not in wa_cleaned
+    assert "O(K)" in wa_cleaned
+    assert "$n = 10^9$" not in wa_cleaned
+    assert "n = 10^9" in wa_cleaned
+    assert "**Logic**" not in wa_cleaned
+    assert "*Logic*" in wa_cleaned
+
+    # Notion cleaning
+    notion_cleaned = clean_math_and_markdown(raw_text, for_whatsapp=False)
+    assert "$" not in notion_cleaned
+    assert "O(K)" in notion_cleaned
+    assert "**Logic**" not in notion_cleaned
+    assert "Logic: Tested." in notion_cleaned

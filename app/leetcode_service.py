@@ -454,11 +454,39 @@ LEETCODE_REVIEW_SYSTEM_INSTRUCTION = (
     "Your role is to rigorously review the user's submitted LeetCode solution.\n\n"
     "Strict requirements:\n"
     "1. VERDICT: Give a clear verdict (e.g. Correct, Incorrect, Suboptimal, Solved).\n"
-    "2. COMPLEXITY: State exact evaluated Time Complexity and Space Complexity in Big-O notation.\n"
+    "2. COMPLEXITY: State exact evaluated Time Complexity and Space Complexity in Big-O notation (e.g. O(N), O(1)).\n"
     "3. OPTIMALITY: State whether the approach is optimal given the stated problem constraints (e.g. If N <= 10^5, an O(N^2) solution will TLE and is Suboptimal).\n"
     "4. ANALYSIS: Provide a concise, highly insightful evaluation of the logic, data structure choice, and potential pitfalls.\n"
-    "5. TARGETED TESTING QUESTIONS: Conclude with 2 to 4 concrete, specific, non-generic testing questions directly testing edge cases and code logic in the submitted implementation (e.g. loop boundaries, negative values, empty/single element inputs, duplicate keys, overflow). DO NOT provide generic boilerplate interview lists."
+    "5. TARGETED TESTING QUESTIONS: Conclude with 2 to 4 concrete, specific, non-generic testing questions directly testing edge cases and code logic in the submitted implementation (e.g. loop boundaries, negative values, empty/single element inputs, duplicate keys, overflow). DO NOT provide generic boilerplate interview lists.\n\n"
+    "FORMATTING RULES:\n"
+    "- DO NOT use LaTeX math notation or dollar signs (e.g. write O(N), O(1), N, 10^9 directly, NEVER $O(N)$ or $10^9$).\n"
+    "- DO NOT use markdown double asterisks (**) inside sentences. Keep formatting clean and legible."
 )
+
+
+def clean_math_and_markdown(text: str, for_whatsapp: bool = True) -> str:
+    """Clean LaTeX math delimiters ($...$, $$...$$) and normalize markdown asterisks."""
+    if not text:
+        return ""
+
+    # 1. Remove LaTeX math delimiters: $$...$$ -> ... and $...$ -> ...
+    # e.g., $O(K)$ -> O(K), $n = 10^9$ -> n = 10^9, $n$ -> n
+    cleaned = re.sub(r"\$\$(.*?)\$\$", r"\1", text)
+    cleaned = re.sub(r"\$([^\$\n]+?)\$", r"\1", cleaned)
+
+    # 2. Normalize markdown bold formatting
+    if for_whatsapp:
+        # WhatsApp uses *bold*, convert ***text*** -> *text* and **text** -> *text*
+        cleaned = re.sub(r"\*\*\*([^\*\n]+?)\*\*\*", r"*\1*", cleaned)
+        cleaned = re.sub(r"\*\*([^\*\n]+?)\*\*", r"*\1*", cleaned)
+        # Avoid consecutive asterisks
+        cleaned = re.sub(r"\*{2,}", "*", cleaned)
+    else:
+        # For Notion text, strip markdown **bold** so it doesn't display raw asterisks
+        cleaned = re.sub(r"\*\*\*([^\*\n]+?)\*\*\*", r"\1", cleaned)
+        cleaned = re.sub(r"\*\*([^\*\n]+?)\*\*", r"\1", cleaned)
+
+    return cleaned
 
 
 def generate_leetcode_review(
@@ -551,11 +579,11 @@ def generate_leetcode_review(
                 if clean_l:
                     testing_questions.append(clean_l)
 
-        if not testing_questions:
-            testing_questions = [
-                f"How does your implementation handle extreme boundary inputs for {prob_title}?",
-                "What happens when duplicate or negative values are passed to the function?",
-            ]
+        # Sanitize math/LaTeX artifacts and excessive markdown
+        time_comp = clean_math_and_markdown(time_comp, for_whatsapp=False)
+        space_comp = clean_math_and_markdown(space_comp, for_whatsapp=False)
+        analysis = clean_math_and_markdown(analysis, for_whatsapp=False)
+        testing_questions = [clean_math_and_markdown(q, for_whatsapp=False) for q in testing_questions]
 
         return LeetcodeReviewResult(
             problem_title=prob_title,
@@ -715,7 +743,7 @@ def execute_leetcode_background_pipeline(
     if notion_url:
         msg_lines.append(f"🔗 *Notion Log:* {notion_url}")
 
-    follow_up_message = "\n".join(msg_lines).strip()
+    follow_up_message = clean_math_and_markdown("\n".join(msg_lines).strip(), for_whatsapp=True)
 
     # Step 6: Send finished review back to WhatsApp / Telegram
     if to_phone:

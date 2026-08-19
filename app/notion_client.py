@@ -24,6 +24,27 @@ class NotionValidationError(ValueError):
         self.property_name = property_name
 
 
+def clean_math_and_markdown(text: Optional[str], for_whatsapp: bool = False) -> str:
+    """Clean LaTeX math delimiters ($...$, $$...$$) and normalize markdown asterisks."""
+    if not text:
+        return ""
+
+    # 1. Remove LaTeX math delimiters: $$...$$ -> ... and $...$ -> ...
+    cleaned = re.sub(r"\$\$(.*?)\$\$", r"\1", text)
+    cleaned = re.sub(r"\$([^\$\n]+?)\$", r"\1", cleaned)
+
+    # 2. Normalize markdown bold formatting
+    if for_whatsapp:
+        cleaned = re.sub(r"\*\*\*([^\*\n]+?)\*\*\*", r"*\1*", cleaned)
+        cleaned = re.sub(r"\*\*([^\*\n]+?)\*\*", r"*\1*", cleaned)
+        cleaned = re.sub(r"\*{2,}", "*", cleaned)
+    else:
+        cleaned = re.sub(r"\*\*\*([^\*\n]+?)\*\*\*", r"\1", cleaned)
+        cleaned = re.sub(r"\*\*([^\*\n]+?)\*\*", r"\1", cleaned)
+
+    return cleaned
+
+
 class TaskDict(dict):
     """Dictionary representing a task, supporting both dict indexing and attribute access."""
 
@@ -1172,8 +1193,8 @@ class NotionAssistantClient:
         opt_str = "Optimal approach" if is_optimal else "Suboptimal approach"
         summary_lines = [
             f"Verdict: {verdict_str} ({opt_str})",
-            f"Time Complexity: {time_complexity or 'N/A'}",
-            f"Space Complexity: {space_complexity or 'N/A'}",
+            f"Time Complexity: {clean_math_and_markdown(time_complexity, for_whatsapp=False) or 'N/A'}",
+            f"Space Complexity: {clean_math_and_markdown(space_complexity, for_whatsapp=False) or 'N/A'}",
         ]
         callout_text = "\n".join(summary_lines)
         blocks.append({
@@ -1191,7 +1212,7 @@ class NotionAssistantClient:
         if review_text and review_text.strip():
             blocks.append(make_heading_2("Analysis & Complexity Review"))
             for paragraph in review_text.strip().split("\n\n"):
-                clean_p = paragraph.strip()
+                clean_p = clean_math_and_markdown(paragraph.strip(), for_whatsapp=False)
                 if not clean_p:
                     continue
                 for i in range(0, len(clean_p), 2000):
@@ -1201,7 +1222,7 @@ class NotionAssistantClient:
         if testing_questions:
             blocks.append(make_heading_2("Targeted Testing & Logic Questions"))
             for q in testing_questions:
-                clean_q = q.strip().lstrip("•-*0123456789. ")
+                clean_q = clean_math_and_markdown(q.strip().lstrip("•-*0123456789. "), for_whatsapp=False)
                 if clean_q:
                     for i in range(0, len(clean_q), 2000):
                         blocks.append(make_bullet_item(clean_q[i:i + 2000]))
