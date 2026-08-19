@@ -59,7 +59,7 @@ STAGE1_SYSTEM_INSTRUCTION = (
     "You are a lightweight intent routing classifier. Classify the user's message into exactly one MODULE:\n"
     "- TASKS: Creating or querying tasks, managing to-do items, updating task status, checking today's or pending tasks, priority queries (e.g. 'high priority tasks'), and conversational follow-ups (e.g. 'others?', 'show more', 'next', 'what else?').\n"
     "- MIND: Substack drafts, journaling, brain dumps, rambling, daily reflections/logs, personal thoughts. NOTE: Short conversational follow-up questions (e.g. 'others?', 'what about tomorrow?') are NOT Mind entries; they belong to TASKS.\n"
-    "- LEARNING: New study topic requests, learning roadmaps, syllabus inquiries, concept exploration.\n"
+    "- LEARNING: New study topic requests, learning roadmaps, syllabus inquiries, concept exploration, gathering foundational papers/resources (e.g. 'i want to learn about foundational papers for Gemini AI', 'explore gemma models', 'gather resources for transformers').\n"
     "- LEETCODE: LeetCode problem review requests, algorithm practice notes, problem solution tracking.\n"
     "Pass the raw user message into the raw_text field."
 )
