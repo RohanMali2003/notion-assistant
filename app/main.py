@@ -375,7 +375,7 @@ async def _handle_module_action(
         intent = parsed_task.intent
 
         if intent == "CREATE_TASK":
-            await run_in_threadpool(
+            created_page = await run_in_threadpool(
                 notion_client.create_task,
                 title=parsed_task.title or text,
                 priority=parsed_task.priority,
@@ -383,7 +383,14 @@ async def _handle_module_action(
                 due_date=parsed_task.due_date,
                 description=parsed_task.description,
             )
+            page_url = created_page.get("url") if isinstance(created_page, dict) else None
+            if not page_url and isinstance(created_page, dict) and created_page.get("id"):
+                clean_id = created_page["id"].replace("-", "")
+                page_url = f"https://www.notion.so/{clean_id}"
+
             reply_text = f"✅ Task created: *{parsed_task.title or text}*"
+            if page_url:
+                reply_text += f"\n🔗 {page_url}"
             if parsed_task.due_date:
                 reply_text += f"\n📅 Due: {parsed_task.due_date}"
             if parsed_task.priority:
@@ -395,14 +402,21 @@ async def _handle_module_action(
         elif intent == "UPDATE_TASK":
             target_status = parsed_task.target_status or "In progress"
             title_query = parsed_task.title or text
-            success, matched_title, _ = await run_in_threadpool(
+            success, matched_title, updated_page = await run_in_threadpool(
                 notion_client.update_task_status,
                 title_query=title_query,
                 status_name=target_status,
                 new_due_date=parsed_task.new_due_date or parsed_task.due_date,
             )
             if success:
+                page_url = updated_page.get("url") if isinstance(updated_page, dict) else None
+                if not page_url and isinstance(updated_page, dict) and updated_page.get("id"):
+                    clean_id = updated_page["id"].replace("-", "")
+                    page_url = f"https://www.notion.so/{clean_id}"
+
                 reply_text = f"✅ Updated *{matched_title}*\n🔄 Status: *{target_status}*"
+                if page_url:
+                    reply_text += f"\n🔗 {page_url}"
                 if parsed_task.new_due_date or parsed_task.due_date:
                     reply_text += f"\n📅 Due: {parsed_task.new_due_date or parsed_task.due_date}"
             else:
@@ -412,9 +426,23 @@ async def _handle_module_action(
         elif intent == "QUERY_TODAY":
             today_items = await run_in_threadpool(notion_client.get_today_tasks)
             if today_items:
-                tasks_str = "\n".join(
-                    [f"• {item.title}" + (f" (Due: {item.due_date})" if item.due_date else "") for item in today_items]
-                )
+                tasks_lines = []
+                for item in today_items:
+                    item_title = getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else str(item))
+                    item_due = getattr(item, "due_date", None) or (item.get("due_date") if isinstance(item, dict) else None)
+                    item_url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else None)
+                    if not item_url:
+                        p_id = getattr(item, "page_id", None) or (item.get("page_id") if isinstance(item, dict) else None)
+                        if p_id:
+                            item_url = f"https://www.notion.so/{str(p_id).replace('-', '')}"
+
+                    line = f"• *{item_title}*"
+                    if item_due:
+                        line += f" (Due: {item_due})"
+                    if item_url:
+                        line += f"\n  🔗 {item_url}"
+                    tasks_lines.append(line)
+                tasks_str = "\n".join(tasks_lines)
                 return f"📅 *Today's Tasks ({len(today_items)}):*\n{tasks_str}"
             else:
                 return "🎉 No tasks due today!"
@@ -422,9 +450,23 @@ async def _handle_module_action(
         elif intent == "QUERY_PENDING":
             pending_items = await run_in_threadpool(notion_client.get_pending, limit=5)
             if pending_items:
-                tasks_str = "\n".join(
-                    [f"• {item.title}" + (f" (Due: {item.due_date})" if item.due_date else "") for item in pending_items]
-                )
+                tasks_lines = []
+                for item in pending_items:
+                    item_title = getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else str(item))
+                    item_due = getattr(item, "due_date", None) or (item.get("due_date") if isinstance(item, dict) else None)
+                    item_url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else None)
+                    if not item_url:
+                        p_id = getattr(item, "page_id", None) or (item.get("page_id") if isinstance(item, dict) else None)
+                        if p_id:
+                            item_url = f"https://www.notion.so/{str(p_id).replace('-', '')}"
+
+                    line = f"• *{item_title}*"
+                    if item_due:
+                        line += f" (Due: {item_due})"
+                    if item_url:
+                        line += f"\n  🔗 {item_url}"
+                    tasks_lines.append(line)
+                tasks_str = "\n".join(tasks_lines)
                 return f"📋 *Pending Tasks ({len(pending_items)}):*\n{tasks_str}"
             else:
                 return "🎉 No pending tasks found!"
@@ -439,7 +481,7 @@ async def _handle_module_action(
         entry_content = mind_entry.content or text
         entry_sub_intent = mind_entry.sub_intent or "DAILY_LOG"
 
-        await run_in_threadpool(
+        created_mind = await run_in_threadpool(
             notion_client.create_mind_entry,
             entry_type=entry_sub_intent,
             title=entry_title,
@@ -447,6 +489,10 @@ async def _handle_module_action(
             core_thesis=mind_entry.core_thesis,
             tags=mind_entry.tags,
         )
+        mind_url = created_mind.get("url") if isinstance(created_mind, dict) else None
+        if not mind_url and isinstance(created_mind, dict) and created_mind.get("id"):
+            clean_id = created_mind["id"].replace("-", "")
+            mind_url = f"https://www.notion.so/{clean_id}"
 
         if entry_sub_intent == "DRAFT_SUBSTACK":
             reply_text = f"✍️ *Substack Draft Created (Idea):* *{entry_title}*"
@@ -455,6 +501,8 @@ async def _handle_module_action(
         else:
             reply_text = f"📝 *Daily Log Recorded:* *{entry_title}*"
 
+        if mind_url:
+            reply_text += f"\n🔗 {mind_url}"
         if mind_entry.core_thesis:
             reply_text += f"\n💡 *Core Thesis:* {mind_entry.core_thesis}"
         elif mind_entry.summary:

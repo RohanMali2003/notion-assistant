@@ -503,12 +503,19 @@ class NotionAssistantClient:
                 if ms and isinstance(ms, list):
                     tag = ms[0].get("name")
 
+        page_id = page.get("id")
+        page_url = page.get("url")
+        if not page_url and page_id:
+            clean_id = page_id.replace("-", "")
+            page_url = f"https://www.notion.so/{clean_id}"
+
         return TaskDict(
             title=title,
             due_date=due_date,
             priority=priority,
             tag=tag,
-            page_id=page.get("id")
+            page_id=page_id,
+            url=page_url,
         )
 
     def _query_database(self, **kwargs) -> Dict[str, Any]:
