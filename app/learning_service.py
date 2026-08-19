@@ -24,7 +24,7 @@ from app.whatsapp_client import WhatsAppAssistantClient
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 
 
 def get_gemini_client():

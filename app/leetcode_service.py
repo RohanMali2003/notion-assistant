@@ -25,7 +25,7 @@ from app.whatsapp_client import WhatsAppAssistantClient
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 LEETCODE_GRAPHQL_URL = "https://leetcode.com/graphql"
 
 
@@ -209,8 +209,8 @@ def fetch_latest_leethub_commit(
         headers["Authorization"] = f"Bearer {target_pat}"
 
     with httpx.Client(timeout=timeout) as client:
-        # 1. Fetch latest commit on default branch
-        commits_url = f"https://api.github.com/repos/{clean_repo}/commits?per_page=1"
+        # 1. Fetch recent commits on default branch to locate the latest solution commit
+        commits_url = f"https://api.github.com/repos/{clean_repo}/commits?per_page=15"
         resp = client.get(commits_url, headers=headers)
         if resp.status_code != 200:
             logger.error("GitHub API error fetching commits (%s): %s", resp.status_code, resp.text)
@@ -220,28 +220,51 @@ def fetch_latest_leethub_commit(
         if not isinstance(commits_data, list) or not commits_data:
             raise RuntimeError(f"No commits found in repository '{clean_repo}'.")
 
-        latest_sha = commits_data[0].get("sha", "")
-        commit_msg = commits_data[0].get("commit", {}).get("message", "")
+        target_commit = None
+        target_files = []
+        target_sha = ""
+        target_msg = ""
 
-        # 2. Fetch full commit details including files changed
-        commit_detail_url = f"https://api.github.com/repos/{clean_repo}/commits/{latest_sha}"
-        detail_resp = client.get(commit_detail_url, headers=headers)
-        if detail_resp.status_code != 200:
-            raise RuntimeError(f"GitHub API error fetching commit details ({detail_resp.status_code}): {detail_resp.text}")
+        for c in commits_data:
+            c_sha = c.get("sha", "")
+            c_msg = c.get("commit", {}).get("message", "")
+            detail_url = f"https://api.github.com/repos/{clean_repo}/commits/{c_sha}"
+            detail_resp = client.get(detail_url, headers=headers)
+            if detail_resp.status_code != 200:
+                continue
 
-        commit_detail = detail_resp.json()
-        files = commit_detail.get("files", [])
+            c_detail = detail_resp.json()
+            c_files = c_detail.get("files", [])
+            has_code = any(
+                os.path.splitext(f.get("filename", ""))[1].lower() in CODE_EXTENSIONS
+                for f in c_files if isinstance(f, dict)
+            )
+
+            if has_code or not target_commit:
+                target_commit = c_detail
+                target_files = c_files
+                target_sha = c_sha
+                target_msg = c_msg
+                if has_code:
+                    break
+
+        files = target_files
+        latest_sha = target_sha
+        commit_msg = target_msg
 
         file_paths = [f.get("filename", "") for f in files if isinstance(f, dict)]
         readme_content: Optional[str] = None
         code_content: str = ""
         code_file_name: str = ""
+        problem_folder: Optional[str] = None
 
         # Identify solution file and README.md
         for f in files:
             fname = f.get("filename", "")
             base_fname = os.path.basename(fname)
             ext = os.path.splitext(base_fname)[1].lower()
+            if "/" in fname:
+                problem_folder = fname.split("/")[0]
 
             if base_fname.lower() == "readme.md":
                 raw_url = f.get("raw_url")
@@ -268,7 +291,6 @@ def fetch_latest_leethub_commit(
                     except Exception as c_err:
                         logger.debug("Could not fetch raw code: %s", c_err)
                 if not code_content and patch:
-                    # Strip diff prefix markers from patch
                     clean_lines = []
                     for line in patch.split("\n"):
                         if line.startswith("+") and not line.startswith("+++"):
@@ -276,6 +298,19 @@ def fetch_latest_leethub_commit(
                         elif not line.startswith("-") and not line.startswith("@@"):
                             clean_lines.append(line)
                     code_content = "\n".join(clean_lines)
+
+        # If README wasn't part of this commit but we know the problem folder, try fetching it directly
+        if not readme_content and problem_folder and problem_folder.lower() not in ("stats.json", ".github", ".git"):
+            try:
+                import base64
+                folder_readme_url = f"https://api.github.com/repos/{clean_repo}/contents/{problem_folder}/README.md"
+                r_resp = client.get(folder_readme_url, headers=headers)
+                if r_resp.status_code == 200:
+                    encoded_body = r_resp.json().get("content", "")
+                    if encoded_body:
+                        readme_content = base64.b64decode(encoded_body).decode("utf-8", errors="replace")
+            except Exception as r_exc:
+                logger.debug("Could not fetch folder README: %s", r_exc)
 
         # Parse problem metadata
         prob_title, prob_slug, prob_num = parse_problem_title_and_slug(
