@@ -2,7 +2,7 @@ name: Notion Reminders Cron Job
 
 on:
   schedule:
-    - cron: '30 2 * * *'   # 2:30 AM UTC = 8:00 AM IST
+    - cron: '30 18 * * *'   # 18:30 UTC = 12:00 AM (Midnight) IST
   workflow_dispatch:
 
 jobs:
@@ -63,7 +63,7 @@ jobs:
           python cron/find_duplicates.py
 
       - name: Run Sunday Life & Study Velocity Digest
-        if: github.event.schedule == '30 2 * * 0' || github.event_name == 'workflow_dispatch'
+        if: github.event.schedule == '30 18 * * 0' || github.event_name == 'workflow_dispatch'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY || secrets.GOOGLE_API_KEY }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY || secrets.GEMINI_API_KEY }}
