@@ -5,6 +5,7 @@ import pytest
 from app.schemas import SearchQueryAnalysis, WorkspacePageNode
 from app.search_service import execute_second_brain_search_pipeline
 from app.workspace_service import (
+    archive_page_to_archive_index,
     build_workspace_hierarchy_graph,
     explore_container,
     extract_page_block_contents,
@@ -180,5 +181,74 @@ def test_execute_second_brain_search_folder_explore(mock_explore):
     )
 
     assert res["type"] == "FOLDER_EXPLORE"
+    mock_wa.send_message.assert_called_once()
+    mock_tg.send_message.assert_called_once()
+
+
+def test_archive_page_to_archive_index():
+    mock_notion = MagicMock()
+    mock_client = MagicMock()
+    mock_notion.client = mock_client
+
+    with patch("app.workspace_service.inspect_page_content") as mock_inspect, \
+         patch("app.workspace_service.build_workspace_hierarchy_graph") as mock_graph:
+        
+        mock_inspect.return_value = MagicMock(
+            status="ok",
+            page_title="year one budget",
+            page_url="https://notion.so/budget",
+            breadcrumb="Home > Notes > year one budget",
+            extracted_text="Tuition: $15,000\nHousing: $1,200",
+        )
+        mock_graph.return_value = {
+            "page-budget": WorkspacePageNode(
+                id="page-budget",
+                title="year one budget",
+                url="https://notion.so/budget",
+            )
+        }
+
+        # Mock search for Archive Index DB and creation of page
+        mock_notion._request_with_retry.side_effect = [
+            {"results": [{"id": "db-archive", "title": [{"plain_text": "Archive Index"}]}]}, # Search DB
+            {"id": "page-archived-budget", "url": "https://notion.so/archived-budget"}, # Create page in Archive Index DB
+            {}, # Update source page (archived=True)
+        ]
+
+        res = archive_page_to_archive_index("year one budget", notion_client=mock_notion)
+        assert res["status"] == "ok"
+        assert "Page Archived Successfully" in res["reply_text"]
+        assert "Archive > Archive Index" in res["breadcrumb"]
+        assert "https://notion.so/archived-budget" in res["reply_text"]
+
+
+@patch("app.search_service.archive_page_to_archive_index")
+def test_execute_second_brain_search_archive(mock_archive):
+    mock_archive.return_value = {
+        "status": "ok",
+        "page_title": "year one budget",
+        "page_url": "https://notion.so/archived-budget",
+        "reply_text": "📦 *Page Archived Successfully!*",
+    }
+
+    mock_wa = MagicMock()
+    mock_tg = MagicMock()
+
+    analysis = SearchQueryAnalysis(
+        query="archive year one budget",
+        search_type="ARCHIVE_SUGGEST",
+        page_name="year one budget",
+    )
+
+    res = execute_second_brain_search_pipeline(
+        query="archive year one budget",
+        search_analysis=analysis,
+        to_phone="15551234567",
+        chat_id="777",
+        whatsapp_client=mock_wa,
+        telegram_client=mock_tg,
+    )
+
+    assert res["type"] == "ARCHIVE_PAGE"
     mock_wa.send_message.assert_called_once()
     mock_tg.send_message.assert_called_once()

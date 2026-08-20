@@ -287,12 +287,47 @@ def explore_container(
         except Exception as err:
             logger.error("Failed to list children for container %s: %s", target_node.id, err)
 
-    # 4. Format reply
+    # 4. If container is Archive or contains an Archive Index database, also query the database rows
+    if "archive" in target_node.title.lower():
+        try:
+            # Look for child database or search Archive Index
+            archive_db_id = None
+            for p in subpages:
+                if p.get("type") == "database" and "archive" in p.get("title", "").lower():
+                    archive_db_id = p.get("id")
+                    break
+            if not archive_db_id:
+                # Search database directly
+                db_search = notion._request_with_retry(
+                    notion.client.search,
+                    query="Archive Index",
+                    filter={"property": "object", "value": "database"},
+                    page_size=1,
+                )
+                if db_search.get("results"):
+                    archive_db_id = db_search["results"][0].get("id")
+
+            if archive_db_id:
+                db_rows = notion._query_database(database_id=archive_db_id, page_size=50)
+                for r in db_rows.get("results", []):
+                    rtitle = _extract_page_title(r)
+                    if rtitle:
+                        subpages.append({
+                            "id": r.get("id"),
+                            "title": rtitle,
+                            "url": _extract_page_url(r),
+                            "type": "archived_doc",
+                        })
+        except Exception as db_err:
+            logger.debug("Failed to query Archive Index DB in explore_container: %s", db_err)
+
+    # 5. Format reply
     breadcrumb = target_node.breadcrumb or target_node.title
     if subpages:
         items_text = []
         for item in subpages:
-            icon = "📊" if item.get("type") == "database" else "📄"
+            itype = item.get("type")
+            icon = "📊" if itype == "database" else ("📦" if itype == "archived_doc" else "📄")
             item_url = item.get("url", "")
             items_text.append(f"• {icon} *{item['title']}*\n  🔗 {item_url}")
         
@@ -494,11 +529,125 @@ def inspect_page_content(
     )
 
 
+def archive_page_to_archive_index(
+    page_query: str,
+    notion_client: Optional[NotionAssistantClient] = None,
+) -> Dict[str, Any]:
+    """Relocate a Notion page/document into the Archive Index database."""
+    from datetime import datetime, timezone
+    notion = notion_client or NotionAssistantClient()
+    inspect_res = inspect_page_content(page_query, notion_client=notion)
+
+    if inspect_res.status != "ok":
+        return {
+            "status": "not_found",
+            "reply_text": f"📦 *Archive Action*\n\nCould not find a page matching *'{page_query}'* to archive.",
+        }
+
+    # Locate Archive Index Database
+    archive_db_id = None
+    try:
+        db_search = notion._request_with_retry(
+            notion.client.search,
+            query="Archive Index",
+            filter={"property": "object", "value": "database"},
+            page_size=1,
+        )
+        if db_search.get("results"):
+            archive_db_id = db_search["results"][0].get("id")
+    except Exception as search_err:
+        logger.error("Failed to search Archive Index DB: %s", search_err)
+
+    if not archive_db_id:
+        # Fallback to general guidance if Archive Index database is inaccessible
+        return suggest_page_archival(page_query, notion_client=notion)
+
+    # 1. Fetch raw blocks from source page
+    source_blocks = []
+    source_page_id = None
+    nodes = build_workspace_hierarchy_graph(notion_client=notion)
+    for n in nodes.values():
+        if n.title.lower() == inspect_res.page_title.lower():
+            source_page_id = n.id
+            break
+
+    # 2. Build new row in Archive Index database
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    new_page_properties = {
+        "Name": {
+            "title": [
+                {
+                    "type": "text",
+                    "text": {"content": inspect_res.page_title},
+                }
+            ]
+        },
+        "Type": {
+            "select": {"name": "Doc"}
+        },
+        "Archived month": {
+            "date": {"start": today_str}
+        },
+    }
+
+    # Add child blocks if available
+    child_blocks_payload = []
+    if inspect_res.extracted_text:
+        for line in inspect_res.extracted_text.split("\n")[:30]:
+            if line.strip():
+                child_blocks_payload.append({
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {
+                        "rich_text": [{"type": "text", "text": {"content": line[:2000]}}]
+                    }
+                })
+
+    try:
+        new_page = notion._request_with_retry(
+            notion.client.pages.create,
+            parent={"database_id": archive_db_id},
+            properties=new_page_properties,
+            children=child_blocks_payload[:100] if child_blocks_payload else None,
+        )
+        new_page_url = _extract_page_url(new_page)
+
+        # Mark source page as archived in Notion
+        if source_page_id and notion.client:
+            try:
+                notion._request_with_retry(
+                    notion.client.pages.update,
+                    page_id=source_page_id,
+                    archived=True,
+                )
+            except Exception as arch_err:
+                logger.warning("Could not mark source page %s archived: %s", source_page_id, arch_err)
+
+        reply = (
+            f"📦 *Page Archived Successfully!*\n\n"
+            f"📄 *{inspect_res.page_title}* has been moved from *{inspect_res.breadcrumb}* into your **Archive Index**.\n"
+            f"🔗 {new_page_url}\n\n"
+            f"*(Archived on {today_str})*"
+        )
+
+        return {
+            "status": "ok",
+            "page_title": inspect_res.page_title,
+            "page_url": new_page_url,
+            "breadcrumb": "Archive > Archive Index",
+            "reply_text": clean_math_and_markdown(reply),
+        }
+
+    except Exception as create_err:
+        logger.error("Failed to create page in Archive Index DB: %s", create_err)
+        return suggest_page_archival(page_query, notion_client=notion)
+
+
 def suggest_page_archival(
     page_query: str,
     notion_client: Optional[NotionAssistantClient] = None,
 ) -> Dict[str, Any]:
-    """Provide safe, non-destructive guidance to archive a Notion document."""
+    """Provide safe guidance to archive a Notion document."""
     notion = notion_client or NotionAssistantClient()
     inspect_res = inspect_page_content(page_query, notion_client=notion)
 
@@ -513,9 +662,8 @@ def suggest_page_archival(
         f"Found document: *{inspect_res.page_title}*\n"
         f"📍 Current Location: *{inspect_res.breadcrumb}*\n"
         f"🔗 {inspect_res.page_url}\n\n"
-        f"💡 *To archive this page manually:*\n"
-        f"1. Click the link above to open it in Notion.\n"
-        f"2. Click `•••` in the top right corner and select **Delete / Archive** (or drag the page into your Archive folder)."
+        f"💡 *To archive this page:*\n"
+        f"• Tell Ocean *'archive {inspect_res.page_title}'* to automatically move it to your Archive Index, or click the link above and select **Delete / Archive** in Notion."
     )
 
     return {

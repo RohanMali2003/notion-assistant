@@ -18,6 +18,7 @@ from app.schemas import SearchQueryAnalysis, SearchResultItem
 from app.telegram_client import TelegramAssistantClient
 from app.whatsapp_client import WhatsAppAssistantClient
 from app.workspace_service import (
+    archive_page_to_archive_index,
     build_workspace_hierarchy_graph,
     explore_container,
     inspect_page_content,
@@ -323,16 +324,18 @@ def execute_second_brain_search_pipeline(
     elif search_type == "ARCHIVE_SUGGEST" or any(kw in q_lower for kw in archive_keywords):
         target_doc = page_name
         if not target_doc:
-            for kw in ("archive ", "archive the ", "send down to archive ", "move to archive "):
+            for kw in ("archive ", "archive the ", "send down to archive ", "move to archive ", "send it down to archive "):
                 if kw in q_lower:
                     target_doc = q_lower.split(kw, 1)[1].strip("? .")
                     break
         target_doc = target_doc or query
-        arch_res = suggest_page_archival(target_doc, notion_client=notion)
+        arch_res = archive_page_to_archive_index(target_doc, notion_client=notion)
         reply_text = arch_res.get("reply_text", "")
         result_payload = {
             "status": arch_res.get("status", "ok"),
-            "type": "ARCHIVE_SUGGEST",
+            "type": "ARCHIVE_PAGE",
+            "page_title": arch_res.get("page_title"),
+            "page_url": arch_res.get("page_url"),
             "reply_text": reply_text,
         }
 

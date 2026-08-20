@@ -6,7 +6,7 @@
 [![WhatsApp Cloud API](https://img.shields.io/badge/WhatsApp-Cloud%20API-25D366.svg)](https://developers.facebook.com/)
 [![Telegram Bot](https://img.shields.io/badge/Telegram-Bot%20API-2CA5E0.svg)](https://core.telegram.org/bots/api)
 [![Notion API](https://img.shields.io/badge/Notion-Workspace%20OS-000000.svg)](https://developers.notion.com/)
-[![Tests](https://img.shields.io/badge/tests-201%20passed-success.svg)](https://pytest.org/)
+[![Tests](https://img.shields.io/badge/tests-203%20passed-success.svg)](https://pytest.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > *"A $0/month context-aware, multimodal second brain powered by Google Gemini 2.5/3.5, Meta WhatsApp, Telegram, and Notion."*
