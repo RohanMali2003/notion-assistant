@@ -62,3 +62,23 @@ jobs:
         run: |
           python cron/find_duplicates.py
 
+      - name: Run Sunday Life & Study Velocity Digest
+        if: github.event.schedule == '30 2 * * 0' || github.event_name == 'workflow_dispatch'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY || secrets.GOOGLE_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY || secrets.GEMINI_API_KEY }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN || secrets.NOTION_API_KEY }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY || secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID || secrets.NOTION_TASKS_DB_ID }}
+          NOTION_TASKS_DB_ID: ${{ secrets.NOTION_TASKS_DB_ID || secrets.NOTION_DATABASE_ID }}
+          NOTION_SUBJECTS_DB_ID: ${{ secrets.NOTION_SUBJECTS_DB_ID }}
+          NOTION_RESOURCES_DB_ID: ${{ secrets.NOTION_RESOURCES_DB_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WHATSAPP_PHONE_NUMBER: ${{ secrets.WHATSAPP_PHONE_NUMBER || secrets.DEFAULT_RECIPIENT_PHONE }}
+          WHATSAPP_TOKEN: ${{ secrets.WHATSAPP_TOKEN }}
+          WHATSAPP_PHONE_NUMBER_ID: ${{ secrets.WHATSAPP_PHONE_NUMBER_ID }}
+          APP_ENV: production
+        run: |
+          python cron/weekly_digest.py
+

@@ -17,6 +17,8 @@ from app.leetcode_service import execute_leetcode_background_pipeline
 from app.media_service import execute_media_pipeline
 from app.memory import conversation_memory
 from app.notion_client import NotionAssistantClient
+from app.search_service import execute_second_brain_search_pipeline
+from app.weekly_digest_service import execute_weekly_digest_pipeline
 from app.url_digest_service import (
     execute_url_digest_background_pipeline,
     extract_urls,
@@ -27,9 +29,11 @@ from app.schemas import (
     LeetcodeReviewRequest,
     MindEntry,
     ModuleClassification,
+    SearchQueryAnalysis,
     TaskAnalysis,
     TelegramWebhookUpdate,
     WebhookResponse,
+    WeeklyVelocityReport,
 )
 from app.telegram_client import TelegramAssistantClient
 from app.whatsapp_client import WhatsAppAssistantClient
@@ -65,8 +69,10 @@ STAGE1_SYSTEM_INSTRUCTION = (
     "You are a lightweight intent routing classifier. Classify the user's message into exactly one MODULE:\n"
     "- TASKS: Creating or querying tasks, managing to-do items, updating task status, checking today's or pending tasks, priority queries (e.g. 'high priority tasks'), and conversational follow-ups (e.g. 'others?', 'show more', 'next', 'what else?').\n"
     "- MIND: Substack drafts, journaling, brain dumps, rambling, daily reflections/logs, personal thoughts. NOTE: Short conversational follow-up questions (e.g. 'others?', 'what about tomorrow?') are NOT Mind entries; they belong to TASKS.\n"
-    "- LEARNING: New study topic requests, learning roadmaps, syllabus inquiries, concept exploration, gathering foundational papers/resources (e.g. 'i want to learn about foundational papers for Gemini AI', 'explore gemma models', 'gather resources for transformers').\n"
+    "- LEARNING: Explicit new study topic requests, learning roadmaps, syllabus inquiries (e.g. 'i want to learn about Gemini AI', 'explore gemma models', 'build study plan for transformers').\n"
     "- LEETCODE: LeetCode problem review requests, algorithm practice notes, problem solution tracking.\n"
+    "- DIGEST: Requests for weekly velocity summaries, weekly review, or retrospective (e.g. 'how was my week?', 'weekly digest', 'weekly velocity', 'run weekly review').\n"
+    "- SEARCH: Inquiries querying past notes, search questions, or requests for information from the user's second brain (e.g. 'what were the takeaways from the MoE paper?', 'what did I note about consistent hashing?', 'find my notes on personal site', 'what did I learn about transformers?', 'what are my active subjects?').\n"
     "Pass the raw user message into the raw_text field."
 )
 
@@ -292,12 +298,49 @@ def parse_leetcode_stage2(text: str) -> LeetcodeReviewRequest:
         )
 
 
+STAGE2_SEARCH_INSTRUCTION = (
+    "Extract search query parameters from the user's knowledge inquiry:\n"
+    "- query: The clean core question or search query.\n"
+    "- target_domain: Optional domain tag filter (AI Research, System Design, Distributed Systems, Leetcode, Finances, Schoolwork, etc.).\n"
+    "- time_filter: Optional time filter (e.g. yesterday, past week, last month).\n"
+    "- search_type: QUESTION, FIND_NOTES, LIST_SUBJECTS, or LIST_TASKS."
+)
+
+
+def parse_search_stage2(text: str, context: Optional[str] = None) -> SearchQueryAnalysis:
+    """Stage 2: Parse SEARCH module parameters using gemini-3.5-flash-lite."""
+    try:
+        client = get_gemini_client()
+        model_name = get_gemini_model()
+        prompt_content = f"Recent conversation context:\n{context}\n\nUser query: {text}" if context else text
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt_content,
+            config=types.GenerateContentConfig(
+                system_instruction=STAGE2_SEARCH_INSTRUCTION,
+                response_mime_type="application/json",
+                response_schema=SearchQueryAnalysis,
+            ),
+        )
+        if response.parsed:
+            if isinstance(response.parsed, SearchQueryAnalysis):
+                return response.parsed
+            return SearchQueryAnalysis.model_validate(response.parsed)
+        elif response.text:
+            return SearchQueryAnalysis.model_validate_json(response.text)
+        else:
+            raise ValueError("Empty response from Gemini Stage 2 SEARCH parser")
+    except Exception as exc:
+        logger.warning("Stage 2 SEARCH parsing failed (%s). Falling back to default SearchQueryAnalysis.", exc)
+        return SearchQueryAnalysis(query=text)
+
+
 # --- Two-Stage Pipeline Orchestration ---
 
 def analyze_user_text_two_stage(
     text: str,
     context: Optional[str] = None,
-) -> Tuple[str, Union[TaskAnalysis, MindEntry, LearningRequest, LeetcodeReviewRequest]]:
+) -> Tuple[str, Union[TaskAnalysis, MindEntry, LearningRequest, LeetcodeReviewRequest, SearchQueryAnalysis, str]]:
     """Execute two-stage Gemini pipeline: Stage 1 classification -> Stage 2 module-specific parsing."""
     if context:
         stage1_res = classify_module_stage1(text, context=context)
@@ -330,6 +373,10 @@ def analyze_user_text_two_stage(
         parsed = parse_learning_stage2(raw_text)
     elif module == "LEETCODE":
         parsed = parse_leetcode_stage2(raw_text)
+    elif module == "SEARCH":
+        parsed = parse_search_stage2(raw_text, context=context) if context else parse_search_stage2(raw_text)
+    elif module == "DIGEST":
+        parsed = raw_text
     else:
         parsed = parse_tasks_stage2(raw_text, context=context) if context else parse_tasks_stage2(raw_text)
 
@@ -657,9 +704,25 @@ async def _handle_module_action(
         if lc_req.review_notes:
             reply_text += f"\n📝 Notes: {lc_req.review_notes}"
 
+    elif module == "SEARCH":
+        search_analysis = parsed_result if isinstance(parsed_result, SearchQueryAnalysis) else SearchQueryAnalysis(query=text)
+        search_res = await run_in_threadpool(
+            execute_second_brain_search_pipeline,
+            query=search_analysis.query,
+            notion_client=notion_client,
+        )
         if sender_id:
-            conversation_memory.update_query_state(sender_id, last_module="LEETCODE", last_intent="REVIEW")
-        return reply_text
+            conversation_memory.update_query_state(sender_id, last_module="SEARCH", last_intent="QUESTION")
+        return search_res.get("reply_text", "")
+
+    elif module == "DIGEST":
+        digest_res = await run_in_threadpool(
+            execute_weekly_digest_pipeline,
+            notion_client=notion_client,
+        )
+        if sender_id:
+            conversation_memory.update_query_state(sender_id, last_module="DIGEST", last_intent="GENERATE_DIGEST")
+        return digest_res.get("digest_text", "")
 
     else:
         return f"📝 *Recorded:*\n{text}"
@@ -794,6 +857,42 @@ async def whatsapp_webhook(
             to_phone=sender_phone,
         )
 
+        return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
+
+    if module == "DIGEST":
+        try:
+            await run_in_threadpool(
+                whatsapp_client.send_message,
+                to=sender_phone,
+                text="Compiling your weekly velocity digest...",
+            )
+            conversation_memory.add_assistant_message(sender_phone, "Compiling your weekly velocity digest...", module="DIGEST")
+        except Exception as wa_err:
+            logger.error("Failed to send WhatsApp digest ack: %s", wa_err)
+
+        background_tasks.add_task(
+            execute_weekly_digest_pipeline,
+            to_phone=sender_phone,
+        )
+        return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
+
+    if module == "SEARCH":
+        search_q = parsed_result.query if hasattr(parsed_result, "query") else text
+        try:
+            await run_in_threadpool(
+                whatsapp_client.send_message,
+                to=sender_phone,
+                text="Searching your second brain...",
+            )
+            conversation_memory.add_assistant_message(sender_phone, "Searching your second brain...", module="SEARCH")
+        except Exception as wa_err:
+            logger.error("Failed to send WhatsApp search ack: %s", wa_err)
+
+        background_tasks.add_task(
+            execute_second_brain_search_pipeline,
+            query=search_q,
+            to_phone=sender_phone,
+        )
         return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
 
     # For other modules (TASKS, MIND)
@@ -945,6 +1044,46 @@ async def telegram_webhook(
         background_tasks.add_task(
             execute_leetcode_background_pipeline,
             parsed_result,
+            chat_id=str(chat_id) if chat_id else None,
+        )
+        return {"status": "ok"}
+
+    # If module is DIGEST, acknowledge immediately and enqueue background task
+    if module == "DIGEST":
+        if chat_id:
+            try:
+                await run_in_threadpool(
+                    telegram_client.send_message,
+                    text="Compiling your weekly velocity digest...",
+                    chat_id=str(chat_id),
+                )
+                conversation_memory.add_assistant_message(sender_id, "Compiling your weekly velocity digest...", module="DIGEST")
+            except Exception as tg_err:
+                logger.error("Failed to send Telegram digest ack: %s", tg_err)
+
+        background_tasks.add_task(
+            execute_weekly_digest_pipeline,
+            chat_id=str(chat_id) if chat_id else None,
+        )
+        return {"status": "ok"}
+
+    # If module is SEARCH, acknowledge immediately and enqueue background task
+    if module == "SEARCH":
+        search_q = parsed_result.query if hasattr(parsed_result, "query") else text
+        if chat_id:
+            try:
+                await run_in_threadpool(
+                    telegram_client.send_message,
+                    text="Searching your second brain...",
+                    chat_id=str(chat_id),
+                )
+                conversation_memory.add_assistant_message(sender_id, "Searching your second brain...", module="SEARCH")
+            except Exception as tg_err:
+                logger.error("Failed to send Telegram search ack: %s", tg_err)
+
+        background_tasks.add_task(
+            execute_second_brain_search_pipeline,
+            query=search_q,
             chat_id=str(chat_id) if chat_id else None,
         )
         return {"status": "ok"}

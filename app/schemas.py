@@ -11,13 +11,15 @@ class ModuleEnum(str, Enum):
     MIND = "MIND"
     LEARNING = "LEARNING"
     LEETCODE = "LEETCODE"
+    SEARCH = "SEARCH"
+    DIGEST = "DIGEST"
 
 
 class ModuleClassification(BaseModel):
     """Stage 1: Lightweight classification schema deciding target module."""
-    module: Literal["TASKS", "MIND", "LEARNING", "LEETCODE"] = Field(
+    module: Literal["TASKS", "MIND", "LEARNING", "LEETCODE", "SEARCH", "DIGEST"] = Field(
         ...,
-        description="The target module: TASKS, MIND, LEARNING, or LEETCODE."
+        description="The target module: TASKS, MIND, LEARNING, LEETCODE, SEARCH, or DIGEST."
     )
     raw_text: str = Field(
         default="",
@@ -265,5 +267,45 @@ class WebhookResponse(BaseModel):
     """Standard API response for webhooks and health endpoints."""
     status: str = "ok"
     message: Optional[str] = None
+
+
+# --- Ocean v2.2: Weekly Digest & Second-Brain Search Schemas ---
+
+class WeeklyVelocityReport(BaseModel):
+    """Structured output schema for Sunday Weekly Velocity & Momentum Digest."""
+    velocity_score: int = Field(default=85, description="Momentum/velocity score out of 100.")
+    verdict: str = Field(default="High Momentum", description="Punchy verdict phrase (e.g. High Momentum, Steady Execution, Rebalancing Needed).")
+    headline: str = Field(default="", description="1-sentence executive summary headline.")
+    tasks_completed_count: int = Field(default=0, description="Count of completed tasks.")
+    tasks_pending_count: int = Field(default=0, description="Count of carryover/pending tasks.")
+    completed_highlights: List[str] = Field(default_factory=list, description="Top milestones and tasks completed this week.")
+    learning_progress: List[str] = Field(default_factory=list, description="Subjects studied, papers digested, and concepts mastered.")
+    leetcode_summary: Optional[str] = Field(default=None, description="LeetCode problems and algorithmic patterns practiced.")
+    bottlenecks: List[str] = Field(default_factory=list, description="Carryover tasks, blocked items, or areas needing attention.")
+    next_week_priorities: List[str] = Field(default_factory=list, description="Top 3 high-leverage focus areas for the upcoming week.")
+    full_digest_markdown: str = Field(default="", description="Full clean formatted text for WhatsApp/Telegram delivery.")
+    notion_page_url: Optional[str] = Field(default=None, description="Link to created Notion Weekly Review page.")
+
+
+class SearchQueryAnalysis(BaseModel):
+    """Structured output schema for Stage 2 Second-Brain Search parser."""
+    query: str = Field(..., description="The core search query or question.")
+    target_domain: Optional[str] = Field(default=None, description="Optional domain tag filter (e.g. AI Research, System Design).")
+    time_filter: Optional[str] = Field(default=None, description="Optional relative time filter (e.g. yesterday, past week, last month).")
+    search_type: Literal["QUESTION", "FIND_NOTES", "LIST_SUBJECTS", "LIST_TASKS"] = Field(
+        default="QUESTION",
+        description="Type of knowledge inquiry."
+    )
+
+
+class SearchResultItem(BaseModel):
+    """Represents a retrieved document or page from the Notion second brain."""
+    title: str
+    url: str
+    category: str  # Subject, Resource, Task, Mind, Daily Log
+    domain_tag: Optional[str] = None
+    snippet: str = ""
+    last_edited_time: Optional[str] = None
+
 
 
