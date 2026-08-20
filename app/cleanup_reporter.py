@@ -5,6 +5,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 from app.duplicate_detector import DuplicateCluster, DuplicateItem, find_duplicate_clusters
 from app.notion_client import NotionAssistantClient
+from app.tag_directory import find_tag_reclassification_suggestions
 
 logger = logging.getLogger(__name__)
 
@@ -147,8 +148,8 @@ class NotionCleanupReporter:
 
         return items
 
-    def find_all_duplicates(self) -> Dict[str, List[DuplicateCluster]]:
-        """Run duplicate detection across Subjects, Tasks, and Resources."""
+    def find_all_duplicates(self) -> Dict[str, Any]:
+        """Run duplicate detection and tag optimization audit across Notion databases."""
         subjects = self.fetch_all_subjects()
         tasks = self.fetch_all_tasks()
         resources = self.fetch_all_resources()
@@ -157,10 +158,24 @@ class NotionCleanupReporter:
         task_clusters = find_duplicate_clusters(tasks, category="Task", threshold=0.75)
         resource_clusters = find_duplicate_clusters(resources, category="Resource", threshold=0.80)
 
+        # Audit items tagged 'Miscellaneous' or generic tags for re-tagging suggestions
+        all_items_dicts = []
+        for item in tasks + resources:
+            current_tag = item.tags[0] if item.tags else "Miscellaneous"
+            all_items_dicts.append({
+                "id": item.id,
+                "title": item.title,
+                "url": item.url,
+                "current_tag": current_tag,
+                "text": f"{item.title} {item.status or ''}",
+            })
+        tag_suggestions = find_tag_reclassification_suggestions(all_items_dicts)
+
         return {
             "subjects": subject_clusters,
             "tasks": task_clusters,
             "resources": resource_clusters,
+            "tag_suggestions": tag_suggestions,
         }
 
     def find_or_create_cleanup_page(self) -> Tuple[str, str]:
@@ -367,6 +382,29 @@ class NotionCleanupReporter:
                             ],
                         },
                     })
+
+        # 5. Tag Review & Optimization Suggestions
+        tag_suggestions = audit_results.get("tag_suggestions", [])
+        if tag_suggestions:
+            blocks.append({"object": "block", "type": "divider", "divider": {}})
+            blocks.append({
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {"rich_text": [{"type": "text", "text": {"content": f"🏷️ Tag Optimization & Suggestions ({len(tag_suggestions)})"}}]},
+            })
+            for sug in tag_suggestions[:10]:
+                blocks.append({
+                    "object": "block",
+                    "type": "bulleted_list_item",
+                    "bulleted_list_item": {
+                        "rich_text": [
+                            {"type": "text", "text": {"content": sug["title"], "link": {"url": sug["url"]}}, "annotations": {"bold": True}},
+                            {"type": "text", "text": {"content": f" — Suggest moving from {sug['current_tag']} ➔ "}},
+                            {"type": "text", "text": {"content": sug["suggested_tag"]}, "annotations": {"bold": True, "code": True}},
+                            {"type": "text", "text": {"content": f" ({sug['reason']})"}, "annotations": {"italic": True}},
+                        ],
+                    },
+                })
 
         return blocks
 

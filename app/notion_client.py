@@ -998,20 +998,24 @@ class NotionAssistantClient:
 
     def create_resource_row(
         self,
-        name: str,
-        url: str,
-        resource_type: str,
-        subject_page_id: str,
+        title: Optional[str] = None,
+        name: Optional[str] = None,
+        url: str = "",
+        resource_type: str = "Article",
+        subject_page_id: Optional[str] = None,
+        summary: Optional[str] = None,
+        tags: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Creates a row in NOTION_RESOURCES_DB_ID: Resource Name (title),
 
-        Type (select), URL, and Subjects (relation to Subject page ID).
+        Type (select), URL, and optional Subjects relation, summary, tags.
         """
         target_db_id = self.resources_db_id
         if not target_db_id:
             raise ValueError("NOTION_RESOURCES_DB_ID is not configured.")
 
         schema = self._get_db_properties_schema(target_db_id)
+        res_name = title or name or url or "Untitled Resource"
 
         title_key = "Resource Name"
         if "Resource Name" in schema:
@@ -1026,18 +1030,12 @@ class NotionAssistantClient:
                     title_key = k
                     break
 
-        rel_key = "Subjects"
-        if "Subjects" in schema:
-            rel_key = "Subjects"
-        elif "Subject" in schema:
-            rel_key = "Subject"
-
         type_key = "Type" if (not schema or "Type" in schema) else "Resource Type"
 
         properties: Dict[str, Any] = {
             title_key: {
                 "title": [
-                    {"text": {"content": name or url}}
+                    {"text": {"content": res_name}}
                 ]
             },
             type_key: {
@@ -1048,17 +1046,52 @@ class NotionAssistantClient:
             "URL": {
                 "url": url
             },
-            rel_key: {
-                "relation": [
-                    {"id": subject_page_id}
-                ]
-            }
         }
+
+        # Optional Subject Relation
+        if subject_page_id:
+            rel_key = "Subjects"
+            if "Subjects" in schema:
+                rel_key = "Subjects"
+            elif "Subject" in schema:
+                rel_key = "Subject"
+            properties[rel_key] = {"relation": [{"id": subject_page_id}]}
+
+        # Optional Tags
+        if tags and "Tags" in schema:
+            properties["Tags"] = {"multi_select": [{"name": t} for t in tags[:3]]}
+        elif tags and "Tag" in schema:
+            properties["Tag"] = {"select": {"name": tags[0]}}
+
+        # Optional Summary / Description
+        if summary:
+            for desc_key in ["Summary", "Description", "Notes"]:
+                if desc_key in schema and schema[desc_key] == "rich_text":
+                    properties[desc_key] = {"rich_text": [{"text": {"content": summary[:2000]}}]}
+                    break
+
+        # Optional page children blocks for rich summary
+        children_blocks = []
+        if summary:
+            children_blocks.append({
+                "object": "block",
+                "type": "callout",
+                "callout": {
+                    "icon": {"type": "emoji", "emoji": "💡"},
+                    "rich_text": [{"type": "text", "text": {"content": summary[:2000]}}],
+                },
+            })
+
+        create_kwargs: Dict[str, Any] = {
+            "parent": {"database_id": target_db_id},
+            "properties": properties,
+        }
+        if children_blocks:
+            create_kwargs["children"] = children_blocks
 
         return self._request_with_retry(
             self.client.pages.create,
-            parent={"database_id": target_db_id},
-            properties=properties,
+            **create_kwargs,
         )
 
     def create_starter_task(

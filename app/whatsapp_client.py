@@ -78,3 +78,31 @@ class WhatsAppAssistantClient:
             response = client.post(self.messages_url, json=payload, headers=headers)
             response.raise_for_status()
             return response.json()
+
+    def download_media_bytes(self, media_id: str, timeout: float = 15.0) -> tuple[bytes, str]:
+        """Fetch media URL from WhatsApp Cloud API and download raw binary bytes.
+
+        Returns (media_bytes, mime_type).
+        """
+        if not self.token:
+            raise ValueError("WhatsApp token is missing.")
+
+        media_meta_url = f"{self.api_url}/{media_id}"
+        headers = {"Authorization": f"Bearer {self.token}"}
+
+        with httpx.Client(timeout=timeout) as client:
+            # 1. Query media metadata
+            meta_resp = client.get(media_meta_url, headers=headers)
+            meta_resp.raise_for_status()
+            meta_data = meta_resp.json()
+
+            download_url = meta_data.get("url")
+            mime_type = meta_data.get("mime_type", "image/jpeg")
+
+            if not download_url:
+                raise ValueError(f"No download URL returned for WhatsApp media ID {media_id}")
+
+            # 2. Download binary stream with auth header
+            download_resp = client.get(download_url, headers=headers)
+            download_resp.raise_for_status()
+            return download_resp.content, mime_type

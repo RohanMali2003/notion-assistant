@@ -14,8 +14,14 @@ except ImportError:
 from app.config import settings
 from app.learning_service import execute_learning_background_pipeline
 from app.leetcode_service import execute_leetcode_background_pipeline
+from app.media_service import execute_media_pipeline
 from app.memory import conversation_memory
 from app.notion_client import NotionAssistantClient
+from app.url_digest_service import (
+    execute_url_digest_background_pipeline,
+    extract_urls,
+    is_url_dominant_message,
+)
 from app.schemas import (
     LearningRequest,
     LeetcodeReviewRequest,
@@ -361,8 +367,8 @@ def whatsapp_webhook_handshake(
     raise HTTPException(status_code=403, detail="Verification token mismatch")
 
 
-def _extract_whatsapp_message(payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
-    """Extract sender phone and text from WhatsApp Cloud API webhook payload."""
+def _extract_whatsapp_event(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract sender, event type (text, image), text body or media ID and caption from WhatsApp Cloud API payload."""
     try:
         entries = payload.get("entry", [])
         for entry in entries:
@@ -375,15 +381,32 @@ def _extract_whatsapp_message(payload: Dict[str, Any]) -> Tuple[Optional[str], O
                     msg_type = msg.get("type", "text")
                     if msg_type == "text":
                         text = msg.get("text", {}).get("body", "")
-                        if text and sender:
-                            return str(sender), text
+                        return {"sender": str(sender) if sender else None, "type": "text", "text": text}
+                    elif msg_type == "image":
+                        image_info = msg.get("image", {})
+                        media_id = image_info.get("id")
+                        caption = image_info.get("caption", "")
+                        mime_type = image_info.get("mime_type", "image/jpeg")
+                        return {
+                            "sender": str(sender) if sender else None,
+                            "type": "image",
+                            "media_id": media_id,
+                            "caption": caption,
+                            "mime_type": mime_type,
+                            "text": caption,
+                        }
                     elif "text" in msg:
                         text = msg.get("text", {}).get("body", "") or str(msg.get("text"))
-                        if text and sender:
-                            return str(sender), text
+                        return {"sender": str(sender) if sender else None, "type": "text", "text": text}
     except Exception as exc:
-        logger.debug("Error extracting WhatsApp message: %s", exc)
-    return None, None
+        logger.debug("Error extracting WhatsApp event: %s", exc)
+    return {"sender": None, "type": None, "text": None}
+
+
+def _extract_whatsapp_message(payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    """Extract sender phone and text from WhatsApp Cloud API webhook payload."""
+    ev = _extract_whatsapp_event(payload)
+    return ev.get("sender"), ev.get("text")
 
 
 async def _handle_module_action(
@@ -655,10 +678,74 @@ async def whatsapp_webhook(
         except Exception:
             payload = {}
 
-    sender_phone, text = _extract_whatsapp_message(payload)
-    if not sender_phone or not text:
+    event = _extract_whatsapp_event(payload)
+    sender_phone = event.get("sender")
+    msg_type = event.get("type")
+
+    if not sender_phone or not msg_type:
         logger.info("WhatsApp webhook received non-message or empty event.")
         return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
+
+    whatsapp_client = WhatsAppAssistantClient()
+    notion_client = NotionAssistantClient()
+
+    # 1. Handle Image / Media Messages in WhatsApp
+    if msg_type == "image":
+        media_id = event.get("media_id")
+        caption = event.get("caption", "")
+        if media_id:
+            try:
+                # Immediate acknowledgement
+                await run_in_threadpool(
+                    whatsapp_client.send_message,
+                    to=sender_phone,
+                    text="Analyzing your image with Gemini Vision...",
+                )
+                conversation_memory.add_assistant_message(sender_phone, "Analyzing your image with Gemini Vision...", module="MIND")
+
+                # Download bytes and enqueue background vision pipeline
+                image_bytes, mime_type = await run_in_threadpool(
+                    whatsapp_client.download_media_bytes,
+                    media_id=media_id,
+                )
+                background_tasks.add_task(
+                    execute_media_pipeline,
+                    image_bytes=image_bytes,
+                    mime_type=mime_type,
+                    caption=caption,
+                    to_phone=sender_phone,
+                )
+            except Exception as media_err:
+                logger.error("Failed to process WhatsApp media message: %s", media_err)
+        return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
+
+    # 2. Handle Text Messages in WhatsApp
+    text = event.get("text", "")
+    if not text:
+        return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
+
+    # Check for 1-Tap URL Ingestion
+    if is_url_dominant_message(text):
+        urls = extract_urls(text)
+        if urls:
+            primary_url = urls[0]
+            try:
+                await run_in_threadpool(
+                    whatsapp_client.send_message,
+                    to=sender_phone,
+                    text="Digesting link with Gemini...",
+                )
+                conversation_memory.add_assistant_message(sender_phone, "Digesting link with Gemini...", module="LEARNING")
+            except Exception as wa_err:
+                logger.error("Failed to send WhatsApp URL digest ack: %s", wa_err)
+
+            background_tasks.add_task(
+                execute_url_digest_background_pipeline,
+                url=primary_url,
+                user_comment=text,
+                to_phone=sender_phone,
+            )
+            return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
 
     # 1. Add user message to conversation memory & get rolling context
     conversation_memory.add_user_message(sender_phone, text)
@@ -666,9 +753,6 @@ async def whatsapp_webhook(
 
     # 2. Two-Stage Gemini Classification & Parsing with Context
     module, parsed_result = await run_in_threadpool(analyze_user_text_two_stage, text, context=context)
-
-    whatsapp_client = WhatsAppAssistantClient()
-    notion_client = NotionAssistantClient()
 
     if module == "LEARNING":
         # 1. Immediately reply on WhatsApp with short acknowledgement
@@ -746,14 +830,77 @@ async def telegram_webhook(
         logger.warning("Unauthorized webhook request: secret token mismatch.")
         raise HTTPException(status_code=401, detail="Invalid secret token")
 
-    # 2. Parse Telegram update. Return {"status": "ignored"} with 200 if no message.text
-    if not update.message or not update.message.get("text"):
+    telegram_client = TelegramAssistantClient()
+    notion_client = NotionAssistantClient()
+
+    msg = update.message or {}
+    chat_id = msg.get("chat", {}).get("id")
+    sender_id = str(chat_id) if chat_id else "unknown_tg"
+
+    # 1. Handle Photo / Image Document in Telegram
+    photos = msg.get("photo", [])
+    document = msg.get("document", {})
+    caption = msg.get("caption", "")
+
+    file_id = None
+    if photos and isinstance(photos, list):
+        file_id = photos[-1].get("file_id")
+    elif document and isinstance(document, dict) and document.get("mime_type", "").startswith("image/"):
+        file_id = document.get("file_id")
+
+    if file_id and chat_id:
+        try:
+            await run_in_threadpool(
+                telegram_client.send_message,
+                text="Analyzing your image with Gemini Vision...",
+                chat_id=str(chat_id),
+            )
+            conversation_memory.add_assistant_message(sender_id, "Analyzing your image with Gemini Vision...", module="MIND")
+
+            image_bytes, mime_type = await run_in_threadpool(
+                telegram_client.download_file_bytes,
+                file_id=file_id,
+            )
+            background_tasks.add_task(
+                execute_media_pipeline,
+                image_bytes=image_bytes,
+                mime_type=mime_type,
+                caption=caption,
+                chat_id=str(chat_id),
+            )
+        except Exception as media_err:
+            logger.error("Failed to process Telegram media message: %s", media_err)
+        return {"status": "ok"}
+
+    # 2. Handle Text Messages in Telegram
+    text = msg.get("text")
+    if not text:
         logger.info("Webhook request ignored: no message text present.")
         return {"status": "ignored"}
 
-    text = update.message.get("text")
-    chat_id = update.message.get("chat", {}).get("id")
-    sender_id = str(chat_id) if chat_id else "unknown_tg"
+    # Check for 1-Tap URL Ingestion
+    if is_url_dominant_message(text):
+        urls = extract_urls(text)
+        if urls:
+            primary_url = urls[0]
+            if chat_id:
+                try:
+                    await run_in_threadpool(
+                        telegram_client.send_message,
+                        text="Digesting link with Gemini...",
+                        chat_id=str(chat_id),
+                    )
+                    conversation_memory.add_assistant_message(sender_id, "Digesting link with Gemini...", module="LEARNING")
+                except Exception as tg_err:
+                    logger.error("Failed to send Telegram URL digest ack: %s", tg_err)
+
+            background_tasks.add_task(
+                execute_url_digest_background_pipeline,
+                url=primary_url,
+                user_comment=text,
+                chat_id=str(chat_id) if chat_id else None,
+            )
+            return {"status": "ok"}
 
     # 1. Add user message to conversation memory & get rolling context
     conversation_memory.add_user_message(sender_id, text)
@@ -761,9 +908,6 @@ async def telegram_webhook(
 
     # 3 & 4. Two-Stage Gemini Classification and Parsing with Context
     module, parsed_result = await run_in_threadpool(analyze_user_text_two_stage, text, context=context)
-
-    notion_client = NotionAssistantClient()
-    telegram_client = TelegramAssistantClient()
 
     # If module is LEARNING, acknowledge immediately and enqueue background task
     if module == "LEARNING":

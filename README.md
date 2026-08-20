@@ -1,42 +1,23 @@
-# 🌊 Ocean v2.0 — The Intelligent Life & Study Operating System
+# 🌊 Ocean v2.1 — The Intelligent Life & Study Operating System
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688.svg)](https://fastapi.tiangolo.com/)
-[![Gemini 2.5/3.5](https://img.shields.io/badge/Google%20Gemini-Structured%20Output-8E7CC3.svg)](https://ai.google.dev/)
+[![Gemini 2.5/3.5](https://img.shields.io/badge/Google%20Gemini-Multimodal%20Vision-8E7CC3.svg)](https://ai.google.dev/)
 [![WhatsApp Cloud API](https://img.shields.io/badge/WhatsApp-Cloud%20API-25D366.svg)](https://developers.facebook.com/)
 [![Telegram Bot](https://img.shields.io/badge/Telegram-Bot%20API-2CA5E0.svg)](https://core.telegram.org/bots/api)
 [![Notion API](https://img.shields.io/badge/Notion-Workspace%20OS-000000.svg)](https://developers.notion.com/)
-[![Tests](https://img.shields.io/badge/tests-174%20passed-success.svg)](https://pytest.org/)
+[![Tests](https://img.shields.io/badge/tests-188%20passed-success.svg)](https://pytest.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> *"A $0/month context-aware, multimodal second brain powered by Google Gemini, Meta WhatsApp, Telegram, and Notion."*
+> *"A $0/month context-aware, multimodal second brain powered by Google Gemini 2.5/3.5, Meta WhatsApp, Telegram, and Notion."*
 
 ---
 
 ## ⚡ What is Ocean?
 
-**Ocean** is an intelligent, context-aware AI assistant designed to run your life, research, study roadmaps, tasks, and writing directly from your favorite messaging apps (**WhatsApp** & **Telegram**). 
+**Ocean** is an intelligent, context-aware AI assistant designed to run your life, research, study roadmaps, whiteboard notes, tasks, and writing directly from your favorite messaging apps (**WhatsApp** & **Telegram**). 
 
-Instead of dealing with clunky Notion interfaces on mobile, you simply talk to Ocean in natural human language. Ocean remembers your recent chat context, routes your intent across specialized intelligence modules, researches canonical papers and documentation on the fly, and organizes everything into a structured, interconnected Notion workspace.
-
-```
-You (on WhatsApp): "Hey, I want to learn about the foundational papers for Gemini AI and Gemma models"
-     ↓
-Ocean (Immediate Ack): "Building your study plan..."
-     ↓
-Gemini AI + Live Grounding: Researches seminal ArXiv papers, technical reports, and docs
-     ↓
-Link Verification: Performs live HTTP health checks & infers types (Paper, Docs, Video, Article)
-     ↓
-Notion Workspace Auto-Population:
-  ├─ 🏛️ Subjects DB: Creates "Gemini AI & Gemma Architecture" with detailed syllabus
-  │    └─ In-Page Resources: Embeds direct clickable paper links & 1-sentence summaries!
-  ├─ 📚 Resources DB: Logs individual verified resource rows linked to the Subject
-  └─ 📋 Tasks Tracker DB: Adds starter tasks linked to the Subject for % Completed rollups
-     ↓
-Ocean (WhatsApp): "✅ Study Plan Ready: Gemini AI & Gemma Models (4/4 resources logged)
-                   🔗 https://app.notion.com/p/Gemini-AI-Gemma-3c138af8cb5881..."
-```
+Instead of dealing with clunky Notion interfaces on mobile, you simply talk to Ocean in natural human language, drop links, or snap photos of whiteboards and handwritten notes. Ocean remembers your recent chat context, routes your intent across specialized intelligence modules, researches canonical papers and documentation on the fly, and organizes everything into a structured, interconnected Notion workspace.
 
 ---
 
@@ -44,19 +25,33 @@ Ocean (WhatsApp): "✅ Study Plan Ready: Gemini AI & Gemma Models (4/4 resources
 
 ```
                                ┌────────────────────────┐
-                               │   🌊 Ocean v2.0 Core   │
+                               │   🌊 Ocean v2.1 Core   │
                                └───────────┬────────────┘
                                            │
-         ┌──────────────────┬──────────────┴─────────────┬──────────────────┐
-         ▼                  ▼                            ▼                  ▼
-  📋 TASKS ENGINE    🏛️ LEARNING ENGINE           💭 MIND & ESSAYS   💻 LEETCODE REVIEW
-  • Conversational   • Deep syllabus synthesis    • Substack drafts  • O(N) complexity
-  • Priority query   • In-page clickable links    • Core thesis      • Space analysis
-  • Smart pagination • Live link verification     • Brain dumps      • Edge cases & Qs
-  • Multi-tagging    • Relational % rollups       • Daily logs       • Direct log links
+         ┌──────────────────┬──────────────┼─────────────┬──────────────────┐
+         ▼                  ▼              ▼             ▼                  ▼
+  📋 TASKS ENGINE    🏛️ LEARNING     📸 VISION &     🔗 1-TAP URL       💻 LEETCODE
+  • Conversational   • Deep syllabus • Whiteboards   • ArXiv papers     • Complexity
+  • Smart pagination • In-page links • Hand notes    • Deep takeaways   • Edge cases
+  • Multi-tagging    • HTTP verify   • Receipts/code • Direct resource  • Space analysis
 ```
 
-### 1. 🧠 Short-Term Conversational Memory & Contextual Routing
+### 1. 📸 Multimodal Vision & Whiteboard Capture (v2.1)
+* **Zero-Effort Capture:** Snap photos of whiteboard architecture diagrams, handwritten study notes, code screenshots, receipts, or official forms directly in WhatsApp or Telegram.
+* **Deep Multimodal Synthesis:** Powered by Gemini Multimodal Vision, Ocean transcribes all diagrams and text, extracts domain concepts, and pinpoints actionable to-dos.
+* **Structured Notion Ingestion:** Automatically routes to **Daily Logs / MIND** (for diagrams and notes) or creates items in **Tasks Tracker** (for receipts and actionable docs) with deep links.
+
+### 2. 🔗 1-Tap "Drop & Digest" URL Ingestion (v2.1)
+* **Instant Ingestion:** Send any URL (ArXiv paper, GitHub repo, Substack post, technical blog, YouTube video) with zero prompt.
+* **Unconstrained Depth & Essence:** Rather than shallow token-constrained summaries, Ocean extracts the paper abstract or article body, synthesizes core essence, key takeaways, and practical engineering implications.
+* **Smart Tag Resolution:** Automatically classifies against the canonical tag directory and creates an entry in Notion **Resources DB** with a direct clickable deep-link.
+
+### 3. 🧹 Automated Notion Cleanup & Tag Optimization Review (v2.1)
+* **Nightly Workspace Hygiene:** Automated GitHub Actions cron audit (`cron/find_duplicates.py`) scans Subjects, Tasks, and Resources using hybrid fuzzy token sorting, sequence matching, and Jaccard containment ($\ge 70\%$).
+* **Live Review Dashboard:** Generates the structured `🧹 Notion Cleanup & Duplicate Review` page in Notion with clickable links.
+* **Tag Optimization Suggestions:** Audits items tagged `Miscellaneous` and recommends moving them to precise domain tags based on keyword density.
+
+### 4. 🧠 Short-Term Conversational Memory & Contextual Routing
 * **Rolling Context Buffer:** Remembers recent conversation turns (per WhatsApp phone number or Telegram chat ID) with automatic 30-minute session TTL.
 * **Natural Follow-ups:** Ask *"What are my high priority tasks?"* followed by *"others?"*, *"more"*, or *"next"*, and Ocean seamlessly paginates through items without repeating.
 * **Anti-Rambling Guardrails:** Short follow-up questions ($\le 4$ words) are protected from being accidentally saved as philosophical essays or journal entries.

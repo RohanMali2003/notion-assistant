@@ -50,3 +50,36 @@ class TelegramAssistantClient:
         if due_date:
             msg += f"\n📅 *Due:* {due_date}"
         return self.send_message(msg)
+
+    def download_file_bytes(self, file_id: str, timeout: float = 15.0) -> tuple[bytes, str]:
+        """Fetch file path from Telegram getFile API and download binary bytes.
+
+        Returns (file_bytes, mime_type).
+        """
+        if not self.bot_token:
+            raise ValueError("Telegram bot token is missing.")
+
+        get_file_url = f"{self.base_url}/getFile"
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(get_file_url, json={"file_id": file_id})
+            resp.raise_for_status()
+            file_data = resp.json()
+
+            file_path = file_data.get("result", {}).get("file_path")
+            if not file_path:
+                raise ValueError(f"No file path returned for Telegram file ID {file_id}")
+
+            download_url = f"https://api.telegram.org/file/bot{self.bot_token}/{file_path}"
+            dl_resp = client.get(download_url)
+            dl_resp.raise_for_status()
+
+            # Infer mime type from file path
+            mime = "image/jpeg"
+            if file_path.lower().endswith(".png"):
+                mime = "image/png"
+            elif file_path.lower().endswith(".webp"):
+                mime = "image/webp"
+            elif file_path.lower().endswith(".pdf"):
+                mime = "application/pdf"
+
+            return dl_resp.content, mime
