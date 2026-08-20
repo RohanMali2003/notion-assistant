@@ -24,10 +24,16 @@ DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 
 
 def get_gemini_client():
-    """Create and return a google-genai Client instance."""
+    """Create and return a google-genai Client instance with 30s timeout."""
     if genai is None:
         raise RuntimeError("google-genai library is not installed or available")
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    try:
+        if types and hasattr(types, "HttpOptions"):
+            http_opts = types.HttpOptions(timeout=30.0)
+            return genai.Client(api_key=api_key, http_options=http_opts) if api_key else genai.Client(http_options=http_opts)
+    except Exception:
+        pass
     return genai.Client(api_key=api_key) if api_key else genai.Client()
 
 
