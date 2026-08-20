@@ -76,6 +76,26 @@ def _extract_page_url(page: Dict[str, Any]) -> str:
     return url
 
 
+def _is_system_generated_page(title: str, tags: List[str]) -> bool:
+    """Detect automated / system review pages so they are never counted as user tasks."""
+    norm = title.lower().strip()
+    if any(
+        kw in norm
+        for kw in (
+            "weekly velocity review",
+            "notion cleanup & duplicate review",
+            "cleanup & duplicate review",
+            "duplicate review",
+            "system docs",
+            "weekly review",
+        )
+    ):
+        return True
+    if any(t.lower() in ("system", "review", "audit", "meta", "digest") for t in tags):
+        return True
+    return False
+
+
 def fetch_past_week_workspace_activity(
     notion_client: Optional[NotionAssistantClient] = None,
     days: int = 7,
@@ -120,6 +140,10 @@ def fetch_past_week_workspace_activity(
                 tags = []
                 if "Tags" in props and props["Tags"].get("multi_select"):
                     tags = [t.get("name", "") for t in props["Tags"]["multi_select"]]
+
+                # Exclude internal system review pages from user accomplishments & metrics
+                if _is_system_generated_page(title, tags):
+                    continue
 
                 task_obj = {
                     "id": page.get("id"),
@@ -318,7 +342,7 @@ def create_notion_weekly_review_page(
     report: WeeklyVelocityReport,
     notion_client: Optional[NotionAssistantClient] = None,
 ) -> Tuple[str, str]:
-    """Create a structured Weekly Review page in Notion. Returns (page_id, page_url)."""
+    """Create or update a structured Weekly Review page in Notion. Returns (page_id, page_url)."""
     notion = notion_client or NotionAssistantClient()
     client = notion.client
     if client is None:
@@ -329,6 +353,23 @@ def create_notion_weekly_review_page(
 
     parent_id = notion.tasks_db_id or notion.subjects_db_id
     parent_obj = {"database_id": parent_id} if parent_id else {"page_id": parent_id}
+
+    # Search if this review page already exists in Notion to avoid duplicate task rows
+    existing_page_id = None
+    existing_page_url = None
+    if notion.tasks_db_id:
+        try:
+            query_res = notion._query_database(
+                database_id=notion.tasks_db_id,
+                filter_obj={"property": "Task name", "title": {"equals": page_title}},
+                page_size=1,
+            )
+            results = query_res.get("results", [])
+            if results:
+                existing_page_id = results[0].get("id")
+                existing_page_url = _extract_page_url(results[0])
+        except Exception as q_err:
+            logger.debug("Could not query existing weekly review page: %s", q_err)
 
     blocks: List[Dict[str, Any]] = [
         {
@@ -408,6 +449,20 @@ def create_notion_weekly_review_page(
                 "numbered_list_item": {"rich_text": [{"type": "text", "text": {"content": clean_math_and_markdown(p)}}]},
             })
 
+    # If existing page exists, update its content blocks
+    if existing_page_id:
+        try:
+            old_blocks = notion._request_with_retry(client.blocks.children.list, block_id=existing_page_id)
+            for b in old_blocks.get("results", []):
+                try:
+                    notion._request_with_retry(client.blocks.delete, block_id=b["id"])
+                except Exception:
+                    pass
+            notion._request_with_retry(client.blocks.children.append, block_id=existing_page_id, children=blocks)
+            return existing_page_id, existing_page_url or f"https://www.notion.so/{existing_page_id.replace('-', '')}"
+        except Exception as update_err:
+            logger.warning("Failed to update existing weekly review page (%s). Recreating.", update_err)
+
     # Create page in Tasks DB or generic parent
     try:
         new_page = notion._request_with_retry(
@@ -415,7 +470,7 @@ def create_notion_weekly_review_page(
             parent={"database_id": notion.tasks_db_id},
             properties={
                 "Task name": {"title": [{"text": {"content": page_title}}]},
-                "Tags": {"multi_select": [{"name": "Miscellaneous"}]},
+                "Tags": {"multi_select": [{"name": "System"}]},
                 "Status": {"status": {"name": "Done"}},
             },
             children=blocks,

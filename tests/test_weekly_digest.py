@@ -80,6 +80,7 @@ def test_create_notion_weekly_review_page():
     mock_client = MagicMock()
     mock_notion.client = mock_client
     mock_notion.tasks_db_id = "tasks-db"
+    mock_notion._query_database.return_value = {"results": []}
     mock_notion._request_with_retry.return_value = {
         "id": "review-page-123",
         "url": "https://notion.so/review-page-123",
@@ -99,6 +100,35 @@ def test_create_notion_weekly_review_page():
     assert page_id == "review-page-123"
     assert page_url == "https://notion.so/review-page-123"
     mock_notion._request_with_retry.assert_called_once()
+
+
+def test_update_existing_notion_weekly_review_page():
+    mock_notion = MagicMock()
+    mock_client = MagicMock()
+    mock_notion.client = mock_client
+    mock_notion.tasks_db_id = "tasks-db"
+    mock_notion._query_database.return_value = {
+        "results": [{"id": "existing-page-999", "url": "https://notion.so/existing-page-999"}]
+    }
+    mock_notion._request_with_retry.side_effect = [
+        {"results": [{"id": "block-1"}]},  # children.list
+        {},  # blocks.delete
+        {},  # children.append
+    ]
+
+    report = WeeklyVelocityReport(
+        velocity_score=95,
+        verdict="High Momentum",
+        headline="Updated review.",
+        completed_highlights=["Shipped feature"],
+        learning_progress=[],
+        bottlenecks=[],
+        next_week_priorities=[],
+    )
+
+    page_id, page_url = create_notion_weekly_review_page(report, notion_client=mock_notion)
+    assert page_id == "existing-page-999"
+    assert page_url == "https://notion.so/existing-page-999"
 
 
 @patch("app.weekly_digest_service.fetch_past_week_workspace_activity")
