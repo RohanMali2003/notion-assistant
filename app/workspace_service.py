@@ -171,12 +171,53 @@ def build_workspace_hierarchy_graph(
                             child_title = b.get("child_database", {}).get("title", "")
                             if child_title:
                                 has_children = True
+                                db_url = f"https://app.notion.com/p/{b_id.replace('-', '')}" if b_id else ""
                                 node.children_pages.append({
                                     "id": b_id,
                                     "title": child_title,
-                                    "url": f"https://app.notion.com/p/{b_id.replace('-', '')}" if b_id else "",
+                                    "url": db_url,
                                     "type": "database",
                                 })
+                                # Register child database node
+                                db_node = nodes_by_id.get(b_id)
+                                if not db_node:
+                                    db_node = WorkspacePageNode(
+                                        id=b_id,
+                                        title=child_title,
+                                        url=db_url,
+                                        parent_type="page_id",
+                                        parent_id=node_id,
+                                        is_container=True,
+                                    )
+                                    nodes_by_id[b_id] = db_node
+                                    nodes_by_title[child_title.lower()] = b_id
+
+                                # Query database rows and index them under the database
+                                try:
+                                    db_rows = notion._query_database(database_id=b_id, page_size=50)
+                                    for r in db_rows.get("results", []):
+                                        r_id = r.get("id")
+                                        r_title = _extract_page_title(r)
+                                        r_url = _extract_page_url(r)
+                                        if r_id and r_title:
+                                            db_node.children_pages.append({
+                                                "id": r_id,
+                                                "title": r_title,
+                                                "url": r_url,
+                                                "type": "doc",
+                                            })
+                                            if r_id not in nodes_by_id:
+                                                nodes_by_id[r_id] = WorkspacePageNode(
+                                                    id=r_id,
+                                                    title=r_title,
+                                                    url=r_url,
+                                                    parent_type="database_id",
+                                                    parent_id=b_id,
+                                                    last_edited_time=r.get("last_edited_time"),
+                                                )
+                                                nodes_by_title[r_title.lower()] = r_id
+                                except Exception as dbr_err:
+                                    logger.debug("Failed to query rows for child_database %s (%s): %s", child_title, b_id, dbr_err)
                     node.is_container = has_children
                 except Exception as b_err:
                     logger.debug("Could not list blocks for node %s: %s", node_id, b_err)
@@ -206,6 +247,71 @@ def build_workspace_hierarchy_graph(
         return nodes_by_id
 
 
+def _normalize_title_text(text: str) -> str:
+    """Normalize digits, punctuation, and common variations for fuzzy matching."""
+    s = text.lower().strip()
+    s = re.sub(r"\b1\b", "one", s)
+    s = re.sub(r"\b2\b", "two", s)
+    s = re.sub(r"\b3\b", "three", s)
+    s = re.sub(r"\b4\b", "four", s)
+    s = re.sub(r"[^\w\s]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _find_best_node_match(
+    query: str,
+    nodes: Dict[str, WorkspacePageNode],
+    is_container_preferred: bool = False,
+) -> Optional[WorkspacePageNode]:
+    """Find the best matching WorkspacePageNode using exact, substring, and fuzzy matching."""
+    if not query or not nodes:
+        return None
+
+    clean_q = query.strip().lower()
+    norm_q = _normalize_title_text(query)
+    q_tokens = set(norm_q.split())
+
+    # 1. Exact match
+    for node in nodes.values():
+        title_lower = node.title.lower()
+        if clean_q == title_lower or norm_q == _normalize_title_text(node.title):
+            return node
+
+    # 2. Substring containment
+    for node in nodes.values():
+        norm_title = _normalize_title_text(node.title)
+        if (len(norm_q) >= 3 and norm_q in norm_title) or (len(norm_title) >= 3 and norm_title in norm_q):
+            return node
+
+    # 3. Fuzzy SequenceMatcher + Token overlap scoring
+    best_node = None
+    best_score = 0.0
+
+    for node in nodes.values():
+        norm_title = _normalize_title_text(node.title)
+        title_tokens = set(norm_title.split())
+
+        # Compute token overlap ratio
+        overlap = len(q_tokens.intersection(title_tokens))
+        overlap_score = overlap / max(len(q_tokens), 1)
+
+        # Compute sequence matcher similarity
+        seq_ratio = difflib.SequenceMatcher(None, norm_q, norm_title).ratio()
+
+        total_score = (overlap_score * 0.6) + (seq_ratio * 0.4)
+
+        if is_container_preferred and node.is_container:
+            total_score += 0.2
+        elif not is_container_preferred and not node.is_container:
+            total_score += 0.1
+
+        if total_score > best_score and total_score >= 0.40:
+            best_score = total_score
+            best_node = node
+
+    return best_node
+
+
 def explore_container(
     container_query: str,
     notion_client: Optional[NotionAssistantClient] = None,
@@ -214,15 +320,7 @@ def explore_container(
     notion = notion_client or NotionAssistantClient()
     nodes = build_workspace_hierarchy_graph(notion_client=notion)
 
-    clean_q = container_query.strip().lower()
-    target_node: Optional[WorkspacePageNode] = None
-
-    # 1. Exact or substring match in hierarchy nodes
-    for node in nodes.values():
-        title_lower = node.title.lower()
-        if clean_q == title_lower or (len(clean_q) >= 3 and clean_q in title_lower):
-            target_node = node
-            break
+    target_node = _find_best_node_match(container_query, nodes, is_container_preferred=True)
 
     # 2. Fallback: Search directly via Notion search
     if not target_node and notion.client:
@@ -432,15 +530,7 @@ def inspect_page_content(
     notion = notion_client or NotionAssistantClient()
     nodes = build_workspace_hierarchy_graph(notion_client=notion)
 
-    clean_q = page_query.strip().lower()
-    target_node: Optional[WorkspacePageNode] = None
-
-    # 1. Match from hierarchy nodes
-    for node in nodes.values():
-        title_lower = node.title.lower()
-        if clean_q == title_lower or (len(clean_q) >= 3 and clean_q in title_lower):
-            target_node = node
-            break
+    target_node = _find_best_node_match(page_query, nodes, is_container_preferred=False)
 
     # 2. Fallback: Search Notion API
     if not target_node and notion.client:
