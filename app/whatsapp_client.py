@@ -19,17 +19,19 @@ class WhatsAppAssistantClient:
         from app.config import settings
 
         if token is not None:
-            self.token = token
+            raw_token = token
         else:
-            self.token = os.getenv("WHATSAPP_TOKEN") or getattr(settings, "WHATSAPP_TOKEN", "")
+            raw_token = os.getenv("WHATSAPP_TOKEN") or getattr(settings, "WHATSAPP_TOKEN", "")
+        self.token = raw_token.strip().replace("\r", "").replace("\n", "") if raw_token else ""
 
         if phone_number_id is not None:
-            self.phone_number_id = phone_number_id
+            raw_phone = phone_number_id
         else:
-            self.phone_number_id = (
+            raw_phone = (
                 os.getenv("WHATSAPP_PHONE_NUMBER_ID")
                 or getattr(settings, "WHATSAPP_PHONE_NUMBER_ID", "")
             )
+        self.phone_number_id = raw_phone.strip().replace("\r", "").replace("\n", "") if raw_phone else ""
 
         if api_url is not None:
             base_api = api_url
@@ -38,7 +40,7 @@ class WhatsAppAssistantClient:
                 os.getenv("WHATSAPP_API_URL")
                 or getattr(settings, "WHATSAPP_API_URL", "https://graph.facebook.com/v20.0")
             )
-        self.api_url = base_api.rstrip("/")
+        self.api_url = base_api.strip().rstrip("/")
         self.messages_url = f"{self.api_url}/{self.phone_number_id}/messages"
 
     def send_template_message(
@@ -87,8 +89,9 @@ class WhatsAppAssistantClient:
         if template_components:
             payload["template"]["components"] = template_components
 
+        clean_token = self.token.strip().replace("\r", "").replace("\n", "")
         headers = {
-            "Authorization": f"Bearer {self.token}",
+            "Authorization": f"Bearer {clean_token}",
             "Content-Type": "application/json",
         }
 
@@ -128,8 +131,9 @@ class WhatsAppAssistantClient:
                 "body": text,
             },
         }
+        clean_token = self.token.strip().replace("\r", "").replace("\n", "")
         headers = {
-            "Authorization": f"Bearer {self.token}",
+            "Authorization": f"Bearer {clean_token}",
             "Content-Type": "application/json",
         }
 
@@ -184,7 +188,8 @@ class WhatsAppAssistantClient:
             raise ValueError("WhatsApp token is missing.")
 
         media_meta_url = f"{self.api_url}/{media_id}"
-        headers = {"Authorization": f"Bearer {self.token}"}
+        clean_token = self.token.strip().replace("\r", "").replace("\n", "")
+        headers = {"Authorization": f"Bearer {clean_token}"}
 
         with httpx.Client(timeout=timeout) as client:
             # 1. Query media metadata
