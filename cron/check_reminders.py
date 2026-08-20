@@ -111,6 +111,20 @@ def check_reminders() -> None:
         print(f"Error executing Telegram request: {err}", file=sys.stderr)
         sys.exit(1)
 
+    # Optional WhatsApp Proactive Notification
+    whatsapp_token = os.environ.get("WHATSAPP_TOKEN")
+    whatsapp_phone_id = os.environ.get("WHATSAPP_PHONE_NUMBER_ID")
+    whatsapp_recipient = os.environ.get("WHATSAPP_PHONE_NUMBER") or os.environ.get("DEFAULT_RECIPIENT_PHONE")
+
+    if whatsapp_token and whatsapp_phone_id and whatsapp_recipient:
+        try:
+            from app.whatsapp_client import WhatsAppAssistantClient
+            wa_client = WhatsAppAssistantClient(token=whatsapp_token, phone_number_id=whatsapp_phone_id)
+            wa_res = wa_client.send_message(to=whatsapp_recipient, text=message, use_template_fallback=True)
+            print(f"WhatsApp notification sent successfully (status: {wa_res.get('status', 'ok')}).")
+        except Exception as wa_err:
+            print(f"WhatsApp notification warning: {wa_err}", file=sys.stderr)
+
 
 if __name__ == "__main__":
     from pathlib import Path

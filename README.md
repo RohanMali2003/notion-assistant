@@ -1,4 +1,4 @@
-# 🌊 Ocean v2.3 — The Intelligent Life, Study & Second-Brain Operating System
+# 🌊 Ocean v2.4 — The Intelligent Life, Study & Second-Brain Operating System
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688.svg)](https://fastapi.tiangolo.com/)
@@ -6,7 +6,7 @@
 [![WhatsApp Cloud API](https://img.shields.io/badge/WhatsApp-Cloud%20API-25D366.svg)](https://developers.facebook.com/)
 [![Telegram Bot](https://img.shields.io/badge/Telegram-Bot%20API-2CA5E0.svg)](https://core.telegram.org/bots/api)
 [![Notion API](https://img.shields.io/badge/Notion-Workspace%20OS-000000.svg)](https://developers.notion.com/)
-[![Tests](https://img.shields.io/badge/tests-203%20passed-success.svg)](https://pytest.org/)
+[![Tests](https://img.shields.io/badge/tests-205%20passed-success.svg)](https://pytest.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > *"A $0/month context-aware, multimodal second brain powered by Google Gemini 2.5/3.5, Meta WhatsApp, Telegram, and Notion."*
@@ -25,24 +25,28 @@ Instead of dealing with clunky Notion interfaces on mobile, you simply talk to O
 
 ```
                                ┌────────────────────────┐
-                               │   🌊 Ocean v2.3 Core   │
+                               │   🌊 Ocean v2.4 Core   │
                                └───────────┬────────────┘
                                            │
   ┌──────────────────┬─────────────────────┼─────────────────────┬──────────────────┐
   ▼                  ▼                     ▼                     ▼                  ▼
-📂 FOLDER EXPLORER 🔍 DEEP BLOCK QA      📸 MULTIMODAL VISION  📈 WEEKLY VELOCITY 🧠 SECOND BRAIN
-• "What's in notes"• "What's in budget"  • Whiteboards & notes • Sunday 7PM Cron  • Natural QA
-• Breadcrumb paths • Numbers & line items• Code screenshots    • Momentum score   • Multi-DB search
-• Zero hardcoding  • Grounded synthesis  • Form & receipt to-do• Notion Archive   • Direct URL cites
-• Archive guidance • Table & list reading• Zero LaTeX artifacts• WhatsApp/Tg ping • Safe lifecycle
+📱 PROACTIVE WA TEXT 📂 FOLDER EXPLORER    🔍 DEEP BLOCK QA      📈 WEEKLY VELOCITY 🧠 SECOND BRAIN
+• 24h fallback temp• "What's in notes"   • "What's in budget"  • Midnight 12AM IST• Natural QA
+• Free utility tier• Breadcrumb paths    • Numbers & line items• Momentum score   • Multi-DB search
+• Zero blocked cron• Zero hardcoding     • Grounded synthesis  • Notion Archive   • Direct URL cites
+• Dual TG+WA dispatch• Archive guidance  • Table & list reading• Safe lifecycle   • 205 unit tests
 ```
 
-### 1. 📂 Dynamic Workspace Hierarchy & Folder Explorer (v2.3)
-* **Zero Hardcoding Dynamic Graph:** Ocean crawls and caches your entire Notion workspace tree from root to leaves, resolving live breadcrumb paths (e.g. `Home > Notes > year one budget...`, `Home > Miscellaneous > Finances for Umass fall`).
-* **Folder Exploration:** Ask *"what's in my notes?"*, *"what's in miscellaneous?"*, or *"show me my notes folder"*, and Ocean lists all child documents and subpages with direct clickable deep links.
-* **Safe Archival Suggestions:** Ask *"archive year one budget"* or *"send finances to archive"*, and Ocean delivers safe, non-destructive guidance with direct links to review and archive.
+### 1. 📱 Proactive WhatsApp Outbound & Free Utility Fallback Engine (v2.4)
+* **Automatic 24-Hour Window Fallback:** When Ocean initiates a message to you outside Meta's 24-hour service window (e.g. 12:00 AM midnight cron task reminders or weekly retrospective pings), Ocean automatically detects the window expiration and dispatches via your approved `ocean_notification` **Utility Template** for $0.
+* **Dual Telegram + WhatsApp Dispatch:** Midnight task reminders and velocity digests ping both your WhatsApp and Telegram simultaneously with zero delivery failures.
 
-### 2. 🔍 Deep Document Inspection & Grounded Block QA (v2.3)
+### 2. 📂 Dynamic Workspace Hierarchy & Folder Explorer (v2.3)
+* **Zero Hardcoding Dynamic Graph:** Ocean crawls and caches your entire Notion workspace tree from root to leaves, resolving live breadcrumb paths (e.g. `Home > Notes > Year 1 Budget...`, `Home > Miscellaneous > Finances for Umass fall`).
+* **Folder Exploration:** Ask *"what's in my notes?"*, *"what's in miscellaneous?"*, or *"show me my notes folder"*, and Ocean lists all child documents and subpages with direct clickable deep links.
+* **Archive Lifecycle:** Ask *"archive year one budget"* or *"send finances to archive"*, and Ocean moves the page into your **Archive Index** database with date metadata and deep links.
+
+### 3. 🔍 Deep Document Inspection & Grounded Block QA (v2.3)
 * **Full-Block Content Reading:** Ocean recursively extracts child blocks (paragraphs, bullet lists, tables, numbered items, and to-dos) from any standalone Notion document.
 * **Granular Synthesis:** Ask *"can you tell me what's in that year one budget?"* or *"did I write about finances for Umass fall?"*, and Gemini synthesizes an unconstrained response detailing exact line items, figures, and takeaways.
 

@@ -32,6 +32,9 @@ jobs:
           NOTION_TASKS_DB_ID: ${{ secrets.NOTION_TASKS_DB_ID || secrets.NOTION_DATABASE_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WHATSAPP_TOKEN: ${{ secrets.WHATSAPP_TOKEN }}
+          WHATSAPP_PHONE_NUMBER_ID: ${{ secrets.WHATSAPP_PHONE_NUMBER_ID }}
+          WHATSAPP_PHONE_NUMBER: ${{ secrets.WHATSAPP_PHONE_NUMBER || secrets.DEFAULT_RECIPIENT_PHONE }}
           APP_ENV: production
         run: |
           python cron/check_reminders.py
