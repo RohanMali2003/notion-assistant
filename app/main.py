@@ -67,12 +67,12 @@ def get_gemini_model() -> str:
 
 STAGE1_SYSTEM_INSTRUCTION = (
     "You are a lightweight intent routing classifier. Classify the user's message into exactly one MODULE:\n"
-    "- TASKS: Creating or querying tasks, managing to-do items, updating task status, checking today's or pending tasks, priority queries (e.g. 'high priority tasks'), and conversational follow-ups (e.g. 'others?', 'show more', 'next', 'what else?').\n"
+    "- TASKS: Creating or querying tasks, managing to-do items, updating task status, checking today's or pending tasks, priority queries (e.g. 'high priority tasks', 'tasks tagged notes'), and conversational follow-ups (e.g. 'others?', 'show more', 'next', 'what else?').\n"
     "- MIND: Substack drafts, journaling, brain dumps, rambling, daily reflections/logs, personal thoughts. NOTE: Short conversational follow-up questions (e.g. 'others?', 'what about tomorrow?') are NOT Mind entries; they belong to TASKS.\n"
     "- LEARNING: Explicit new study topic requests, learning roadmaps, syllabus inquiries (e.g. 'i want to learn about Gemini AI', 'explore gemma models', 'build study plan for transformers').\n"
     "- LEETCODE: LeetCode problem review requests, algorithm practice notes, problem solution tracking.\n"
     "- DIGEST: Requests for weekly velocity summaries, weekly review, or retrospective (e.g. 'how was my week?', 'weekly digest', 'weekly velocity', 'run weekly review').\n"
-    "- SEARCH: Inquiries querying past notes, search questions, or requests for information from the user's second brain (e.g. 'what were the takeaways from the MoE paper?', 'what did I note about consistent hashing?', 'find my notes on personal site', 'what did I learn about transformers?', 'what are my active subjects?').\n"
+    "- SEARCH: Inquiries querying past notes, search questions, folder exploration (e.g. 'what's in my notes?', 'what is in miscellaneous?', 'show my notes folder'), document inspection (e.g. 'what's in that year one budget?', 'tell me what's in finances for umass fall', 'did I write about finances for umass?'), archive suggestions (e.g. 'archive year one budget', 'send to archive'), or requests for information from the user's second brain.\n"
     "Pass the raw user message into the raw_text field."
 )
 
@@ -303,7 +303,12 @@ STAGE2_SEARCH_INSTRUCTION = (
     "- query: The clean core question or search query.\n"
     "- target_domain: Optional domain tag filter (AI Research, System Design, Distributed Systems, Leetcode, Finances, Schoolwork, etc.).\n"
     "- time_filter: Optional time filter (e.g. yesterday, past week, last month).\n"
-    "- search_type: QUESTION, FIND_NOTES, LIST_SUBJECTS, or LIST_TASKS."
+    "- search_type: 'FOLDER_EXPLORE' (if asking what's in a folder/page like 'what\\'s in my notes?', 'what is in miscellaneous?'), "
+    "'PAGE_INSPECT' (if asking to read or inspect content of a specific page/note like 'what\\'s in that year one budget?', 'tell me what\\'s in finances for umass fall'), "
+    "'ARCHIVE_SUGGEST' (if asking to archive or send a page to archive like 'archive year one budget', 'send to archive'), "
+    "'FIND_NOTES', 'LIST_SUBJECTS', 'LIST_TASKS', or 'QUESTION'.\n"
+    "- container_name: Target folder/container name if exploring (e.g. 'Notes', 'Miscellaneous', 'YouTube', 'Archive').\n"
+    "- page_name: Target document or note title if inspecting or archiving (e.g. 'year one budget', 'Finances for Umass fall')."
 )
 
 
@@ -709,10 +714,11 @@ async def _handle_module_action(
         search_res = await run_in_threadpool(
             execute_second_brain_search_pipeline,
             query=search_analysis.query,
+            search_analysis=search_analysis,
             notion_client=notion_client,
         )
         if sender_id:
-            conversation_memory.update_query_state(sender_id, last_module="SEARCH", last_intent="QUESTION")
+            conversation_memory.update_query_state(sender_id, last_module="SEARCH", last_intent=search_analysis.search_type)
         return search_res.get("reply_text", "")
 
     elif module == "DIGEST":
@@ -877,7 +883,8 @@ async def whatsapp_webhook(
         return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
 
     if module == "SEARCH":
-        search_q = parsed_result.query if hasattr(parsed_result, "query") else text
+        search_analysis = parsed_result if isinstance(parsed_result, SearchQueryAnalysis) else SearchQueryAnalysis(query=text)
+        search_q = search_analysis.query
         try:
             await run_in_threadpool(
                 whatsapp_client.send_message,
@@ -891,6 +898,7 @@ async def whatsapp_webhook(
         background_tasks.add_task(
             execute_second_brain_search_pipeline,
             query=search_q,
+            search_analysis=search_analysis,
             to_phone=sender_phone,
         )
         return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
@@ -1069,7 +1077,8 @@ async def telegram_webhook(
 
     # If module is SEARCH, acknowledge immediately and enqueue background task
     if module == "SEARCH":
-        search_q = parsed_result.query if hasattr(parsed_result, "query") else text
+        search_analysis = parsed_result if isinstance(parsed_result, SearchQueryAnalysis) else SearchQueryAnalysis(query=text)
+        search_q = search_analysis.query
         if chat_id:
             try:
                 await run_in_threadpool(
@@ -1084,6 +1093,7 @@ async def telegram_webhook(
         background_tasks.add_task(
             execute_second_brain_search_pipeline,
             query=search_q,
+            search_analysis=search_analysis,
             chat_id=str(chat_id) if chat_id else None,
         )
         return {"status": "ok"}

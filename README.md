@@ -1,4 +1,4 @@
-# 🌊 Ocean v2.2 — The Intelligent Life, Study & Second-Brain Operating System
+# 🌊 Ocean v2.3 — The Intelligent Life, Study & Second-Brain Operating System
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688.svg)](https://fastapi.tiangolo.com/)
@@ -6,7 +6,7 @@
 [![WhatsApp Cloud API](https://img.shields.io/badge/WhatsApp-Cloud%20API-25D366.svg)](https://developers.facebook.com/)
 [![Telegram Bot](https://img.shields.io/badge/Telegram-Bot%20API-2CA5E0.svg)](https://core.telegram.org/bots/api)
 [![Notion API](https://img.shields.io/badge/Notion-Workspace%20OS-000000.svg)](https://developers.notion.com/)
-[![Tests](https://img.shields.io/badge/tests-195%20passed-success.svg)](https://pytest.org/)
+[![Tests](https://img.shields.io/badge/tests-201%20passed-success.svg)](https://pytest.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > *"A $0/month context-aware, multimodal second brain powered by Google Gemini 2.5/3.5, Meta WhatsApp, Telegram, and Notion."*
@@ -17,7 +17,7 @@
 
 **Ocean** is an intelligent, context-aware AI operating system designed to run your life, research, study roadmaps, whiteboard notes, tasks, and second-brain retrieval directly from your favorite messaging apps (**WhatsApp** & **Telegram**). 
 
-Instead of dealing with clunky Notion interfaces on mobile, you simply talk to Ocean in natural human language, drop links, snap photos of whiteboards and handwritten notes, or ask questions across your entire knowledge base. Ocean remembers your recent chat context, routes your intent across specialized intelligence modules, researches canonical papers and documentation on the fly, and organizes everything into a structured, interconnected Notion workspace.
+Instead of dealing with clunky Notion interfaces on mobile, you simply talk to Ocean in natural human language, drop links, snap photos of whiteboards and handwritten notes, or ask questions across your entire knowledge base and standalone folder hierarchies. Ocean remembers your recent chat context, routes your intent across specialized intelligence modules, researches canonical papers and documentation on the fly, and organizes everything into a structured, interconnected Notion workspace.
 
 ---
 
@@ -25,29 +25,38 @@ Instead of dealing with clunky Notion interfaces on mobile, you simply talk to O
 
 ```
                                ┌────────────────────────┐
-                               │   🌊 Ocean v2.2 Core   │
+                               │   🌊 Ocean v2.3 Core   │
                                └───────────┬────────────┘
                                            │
   ┌──────────────────┬─────────────────────┼─────────────────────┬──────────────────┐
   ▼                  ▼                     ▼                     ▼                  ▼
-📋 TASKS & LOGS   🏛️ LEARNING ROADMAPS  📸 MULTIMODAL VISION  📈 WEEKLY VELOCITY 🧠 SECOND BRAIN
-• Conversational  • Deep syllabus       • Whiteboards & notes • Sunday 7PM Cron  • Natural QA
-• Priority query  • In-page paper links • Code screenshots    • Momentum score   • Multi-DB search
-• Smart offset    • HTTP verification   • Form & receipt to-do • Notion Archive  • Direct URL cites
-• Multi-tagging   • Relational rollups  • Zero LaTeX artifacts • WhatsApp/Tg ping• Grounded answers
+📂 FOLDER EXPLORER 🔍 DEEP BLOCK QA      📸 MULTIMODAL VISION  📈 WEEKLY VELOCITY 🧠 SECOND BRAIN
+• "What's in notes"• "What's in budget"  • Whiteboards & notes • Sunday 7PM Cron  • Natural QA
+• Breadcrumb paths • Numbers & line items• Code screenshots    • Momentum score   • Multi-DB search
+• Zero hardcoding  • Grounded synthesis  • Form & receipt to-do• Notion Archive   • Direct URL cites
+• Archive guidance • Table & list reading• Zero LaTeX artifacts• WhatsApp/Tg ping • Safe lifecycle
 ```
 
-### 1. 📈 Sunday Evening "Life & Study Velocity" Executive Digest (v2.2)
+### 1. 📂 Dynamic Workspace Hierarchy & Folder Explorer (v2.3)
+* **Zero Hardcoding Dynamic Graph:** Ocean crawls and caches your entire Notion workspace tree from root to leaves, resolving live breadcrumb paths (e.g. `Home > Notes > year one budget...`, `Home > Miscellaneous > Finances for Umass fall`).
+* **Folder Exploration:** Ask *"what's in my notes?"*, *"what's in miscellaneous?"*, or *"show me my notes folder"*, and Ocean lists all child documents and subpages with direct clickable deep links.
+* **Safe Archival Suggestions:** Ask *"archive year one budget"* or *"send finances to archive"*, and Ocean delivers safe, non-destructive guidance with direct links to review and archive.
+
+### 2. 🔍 Deep Document Inspection & Grounded Block QA (v2.3)
+* **Full-Block Content Reading:** Ocean recursively extracts child blocks (paragraphs, bullet lists, tables, numbered items, and to-dos) from any standalone Notion document.
+* **Granular Synthesis:** Ask *"can you tell me what's in that year one budget?"* or *"did I write about finances for Umass fall?"*, and Gemini synthesizes an unconstrained response detailing exact line items, figures, and takeaways.
+
+### 3. 📈 Sunday Evening "Life & Study Velocity" Executive Digest (v2.2)
 * **Weekly Momentum Tracking:** Evaluates tasks completed vs carried over, learning roadmaps advanced, LeetCode problems solved, and research papers digested over the past 7 days.
 * **Gemini Velocity Synthesis:** Generates a momentum score (0-100), executive headline, breakthrough milestones, bottlenecks, and sets 3 high-leverage strategic priorities for next week.
 * **Dual Delivery:** Automatically creates a structured `📈 Weekly Velocity Review — [Date]` page in Notion and sends a punchy executive digest to WhatsApp and Telegram every Sunday evening (or on demand by asking *"how was my week?"*).
 
-### 2. 🧠 Semantic Second-Brain Search ("Ask Ocean Anything") (v2.2)
+### 4. 🧠 Semantic Second-Brain Search ("Ask Ocean Anything") (v2.2)
 * **Full-Workspace Semantic Retrieval:** Ask natural questions about your past notes, papers, or tasks (e.g. *"What were the key takeaways from the MoE papers?"*, *"What did I note about consistent hashing?"*, *"Find my notes on my personal website"*).
 * **Multi-Database Retrieval:** Seamlessly scans workspace global search, Subjects DB, Resources DB, Tasks DB, and Daily Logs.
 * **Grounded Synthesis with Direct Links:** Synthesizes clear answers grounded in your Notion notes and cites exact pages with clickable Notion URLs.
 
-### 3. 📸 Multimodal Vision & Whiteboard Capture (v2.1)
+### 5. 📸 Multimodal Vision & Whiteboard Capture (v2.1)
 * **Zero-Effort Visual Notes:** Snap photos of whiteboard architecture diagrams, handwritten study notes, code screenshots, receipts, or official forms directly in WhatsApp or Telegram.
 * **Structured Notion Ingestion:** Automatically routes to **Daily Logs / MIND** (for diagrams and notes) or creates items in **Tasks Tracker** (for receipts and actionable docs) with deep links.
 

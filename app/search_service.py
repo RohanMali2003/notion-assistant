@@ -17,6 +17,12 @@ from app.notion_client import NotionAssistantClient, clean_math_and_markdown
 from app.schemas import SearchQueryAnalysis, SearchResultItem
 from app.telegram_client import TelegramAssistantClient
 from app.whatsapp_client import WhatsAppAssistantClient
+from app.workspace_service import (
+    build_workspace_hierarchy_graph,
+    explore_container,
+    inspect_page_content,
+    suggest_page_archival,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -275,37 +281,92 @@ def answer_second_brain_question(
 
 def execute_second_brain_search_pipeline(
     query: str,
+    search_analysis: Optional[SearchQueryAnalysis] = None,
     to_phone: Optional[str] = None,
     chat_id: Optional[str] = None,
     notion_client: Optional[NotionAssistantClient] = None,
     whatsapp_client: Optional[WhatsAppAssistantClient] = None,
     telegram_client: Optional[TelegramAssistantClient] = None,
 ) -> Dict[str, Any]:
-    """Execute Second-Brain search, answer generation, and delivery."""
+    """Execute Second-Brain search, folder exploration, page inspection, or QA generation and deliver result."""
     notion = notion_client or NotionAssistantClient()
     whatsapp = whatsapp_client or WhatsAppAssistantClient()
     telegram = telegram_client or TelegramAssistantClient()
 
-    # 1. Search workspace
-    search_results = search_workspace_knowledge(query, notion_client=notion)
+    search_type = search_analysis.search_type if search_analysis else "QUESTION"
+    container_name = search_analysis.container_name if search_analysis else None
+    page_name = search_analysis.page_name if search_analysis else None
 
-    # 2. Synthesize answer
-    synthesis = answer_second_brain_question(query, search_results)
-    reply_text = synthesis.get("reply_text", "")
+    # Detect heuristic intent from raw query if search_type is generic
+    q_lower = query.strip().lower()
+    folder_keywords = ("what's in my ", "what is in my ", "what's in ", "what is in ", "list pages in ", "show pages in ", "notes in ")
+    archive_keywords = ("archive ", "send down to archive", "move to archive", "send to archive", "send it down to archive")
 
-    # 3. Deliver
+    if search_type == "FOLDER_EXPLORE" or (any(kw in q_lower for kw in folder_keywords) and not page_name):
+        target_folder = container_name
+        if not target_folder:
+            for kw in folder_keywords:
+                if kw in q_lower:
+                    target_folder = q_lower.split(kw, 1)[1].strip("? .")
+                    break
+        target_folder = target_folder or query
+        explore_res = explore_container(target_folder, notion_client=notion)
+        reply_text = explore_res.reply_text
+        result_payload = {
+            "status": explore_res.status,
+            "type": "FOLDER_EXPLORE",
+            "container": explore_res.container_title,
+            "subpages": explore_res.subpages,
+            "reply_text": reply_text,
+        }
+
+    elif search_type == "ARCHIVE_SUGGEST" or any(kw in q_lower for kw in archive_keywords):
+        target_doc = page_name
+        if not target_doc:
+            for kw in ("archive ", "archive the ", "send down to archive ", "move to archive "):
+                if kw in q_lower:
+                    target_doc = q_lower.split(kw, 1)[1].strip("? .")
+                    break
+        target_doc = target_doc or query
+        arch_res = suggest_page_archival(target_doc, notion_client=notion)
+        reply_text = arch_res.get("reply_text", "")
+        result_payload = {
+            "status": arch_res.get("status", "ok"),
+            "type": "ARCHIVE_SUGGEST",
+            "reply_text": reply_text,
+        }
+
+    elif search_type == "PAGE_INSPECT" or ("budget" in q_lower or "finances" in q_lower or "what's in that " in q_lower or "tell me what's in " in q_lower):
+        target_doc = page_name or query
+        inspect_res = inspect_page_content(target_doc, user_question=query, notion_client=notion)
+        reply_text = inspect_res.reply_text
+        result_payload = {
+            "status": inspect_res.status,
+            "type": "PAGE_INSPECT",
+            "page_title": inspect_res.page_title,
+            "reply_text": reply_text,
+        }
+
+    else:
+        # Standard Second-Brain Search & Grounded QA
+        search_results = search_workspace_knowledge(query, notion_client=notion)
+        synthesis = answer_second_brain_question(query, search_results)
+        reply_text = synthesis.get("reply_text", "")
+        result_payload = synthesis
+
+    # Deliver via WhatsApp or Telegram
     if to_phone and reply_text:
         try:
             whatsapp.send_message(to=to_phone, text=reply_text, preview_url=True)
-            logger.info("Sent WhatsApp Second-Brain answer to %s", to_phone)
+            logger.info("Sent WhatsApp Second-Brain response to %s", to_phone)
         except Exception as wa_err:
-            logger.error("Failed to send WhatsApp Second-Brain answer: %s", wa_err)
+            logger.error("Failed to send WhatsApp Second-Brain response: %s", wa_err)
 
     if chat_id and reply_text:
         try:
             telegram.send_message(text=reply_text, chat_id=str(chat_id))
-            logger.info("Sent Telegram Second-Brain answer to %s", chat_id)
+            logger.info("Sent Telegram Second-Brain response to %s", chat_id)
         except Exception as tg_err:
-            logger.error("Failed to send Telegram Second-Brain answer: %s", tg_err)
+            logger.error("Failed to send Telegram Second-Brain response: %s", tg_err)
 
-    return synthesis
+    return result_payload

@@ -292,20 +292,62 @@ class SearchQueryAnalysis(BaseModel):
     query: str = Field(..., description="The core search query or question.")
     target_domain: Optional[str] = Field(default=None, description="Optional domain tag filter (e.g. AI Research, System Design).")
     time_filter: Optional[str] = Field(default=None, description="Optional relative time filter (e.g. yesterday, past week, last month).")
-    search_type: Literal["QUESTION", "FIND_NOTES", "LIST_SUBJECTS", "LIST_TASKS"] = Field(
+    search_type: Literal["QUESTION", "FIND_NOTES", "LIST_SUBJECTS", "LIST_TASKS", "FOLDER_EXPLORE", "PAGE_INSPECT", "ARCHIVE_SUGGEST"] = Field(
         default="QUESTION",
         description="Type of knowledge inquiry."
     )
+    container_name: Optional[str] = Field(default=None, description="Target folder/container if exploring (e.g. Notes, Miscellaneous, Archive, YouTube).")
+    page_name: Optional[str] = Field(default=None, description="Specific document/page name if inspecting content (e.g. year one budget, finances for umass fall).")
 
 
 class SearchResultItem(BaseModel):
     """Represents a retrieved document or page from the Notion second brain."""
     title: str
     url: str
-    category: str  # Subject, Resource, Task, Mind, Daily Log
+    category: str  # Subject, Resource, Task, Mind, Daily Log, Page, Folder
     domain_tag: Optional[str] = None
     snippet: str = ""
     last_edited_time: Optional[str] = None
+    breadcrumb: Optional[str] = None
+
+
+# --- Ocean v2.3: Dynamic Workspace Hierarchy & Page Explorer Schemas ---
+
+class WorkspacePageNode(BaseModel):
+    """Represents a page or container node in the dynamic Notion workspace hierarchy graph."""
+    id: str
+    title: str
+    url: str = ""
+    parent_type: str = "workspace"  # workspace, page_id, database_id, block_id
+    parent_id: Optional[str] = None
+    parent_title: Optional[str] = None
+    breadcrumb: str = ""
+    is_container: bool = False
+    children_pages: List[Dict[str, str]] = Field(default_factory=list)
+    last_edited_time: Optional[str] = None
+
+
+class FolderExploreResult(BaseModel):
+    """Result of exploring a Notion container page or folder."""
+    status: str = "ok"
+    container_title: str
+    container_url: str = ""
+    breadcrumb: str = ""
+    subpages: List[Dict[str, str]] = Field(default_factory=list)  # list of {'title': ..., 'url': ..., 'id': ..., 'type': ...}
+    reply_text: str = ""
+
+
+class PageInspectResult(BaseModel):
+    """Result of deeply inspecting and reading a Notion page's block content."""
+    status: str = "ok"
+    page_title: str
+    page_url: str = ""
+    breadcrumb: str = ""
+    block_count: int = 0
+    extracted_text: str = ""
+    synthesis: str = ""
+    reply_text: str = ""
+
 
 
 
