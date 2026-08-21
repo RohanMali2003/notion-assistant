@@ -376,11 +376,12 @@ class TaskActionType(str, Enum):
     MARK_IN_PROGRESS = "MARK_IN_PROGRESS"
     UPDATE_DUE_DATE = "UPDATE_DUE_DATE"
     DELETE_TASK = "DELETE_TASK"
+    SET_PRIORITY = "SET_PRIORITY"
 
 
 class TaskActionAnalysis(BaseModel):
     """Structured output schema for TASK_ACTION module (updating, rescheduling, completing, archiving tasks)."""
-    action: Literal["MARK_DONE", "MARK_IN_PROGRESS", "UPDATE_DUE_DATE", "DELETE_TASK"] = Field(
+    action: Literal["MARK_DONE", "MARK_IN_PROGRESS", "UPDATE_DUE_DATE", "DELETE_TASK", "SET_PRIORITY"] = Field(
         ...,
         description="The action type to perform on the task."
     )
@@ -395,6 +396,10 @@ class TaskActionAnalysis(BaseModel):
     new_status_name: Optional[Literal["Done", "In progress", "Not started"]] = Field(
         default=None,
         description="New status name to set."
+    )
+    new_priority: Optional[Literal["High", "Medium", "Low"]] = Field(
+        default=None,
+        description="New priority value to set (High, Medium, or Low). Use with SET_PRIORITY action."
     )
     ordinal_index: Optional[int] = Field(
         default=None,
@@ -525,8 +530,49 @@ class BatchTaskActionAnalysis(BaseModel):
         description="New status name to set."
     )
 
+# --- Ocean v3.2: Compound Multi-Intent Schemas ---
+
+class CompoundActionType(str, Enum):
+    """Atomic action types that can be composed inside a CompoundPlan."""
+    BATCH_DELETE   = "BATCH_DELETE"    # Archive all tasks whose title contains target_query
+    ARCHIVE_TASK   = "ARCHIVE_TASK"    # Archive a single named task
+    TASK_SET_PRIO  = "TASK_SET_PRIO"   # Set priority on a single named task
+    BATCH_SET_PRIO = "BATCH_SET_PRIO"  # Set priority on all tasks matching target_query
+    MOVE_TO_LIST   = "MOVE_TO_LIST"    # Add items to a workspace target (e.g. Reading List)
 
 
+class CompoundAction(BaseModel):
+    """A single atomic step extracted from a compound multi-intent user message."""
+    action_type: CompoundActionType = Field(
+        ...,
+        description="The type of atomic action to perform."
+    )
+    target_title: Optional[str] = Field(
+        default=None,
+        description="Exact or approximate title of a single target task (for ARCHIVE_TASK, TASK_SET_PRIO)."
+    )
+    target_query: Optional[str] = Field(
+        default=None,
+        description="Keyword substring to match multiple tasks (for BATCH_DELETE, BATCH_SET_PRIO)."
+    )
+    priority: Optional[Literal["High", "Medium", "Low"]] = Field(
+        default=None,
+        description="Priority value to set (High, Medium, Low). Required for TASK_SET_PRIO and BATCH_SET_PRIO."
+    )
+    dest_target: Optional[str] = Field(
+        default=None,
+        description="Destination workspace page or database title (e.g. 'Reading List'). Required for MOVE_TO_LIST."
+    )
+    items: List[str] = Field(
+        default_factory=list,
+        description="List of item titles to move/add. Required for MOVE_TO_LIST."
+    )
 
 
+class CompoundPlan(BaseModel):
+    """Structured multi-step plan extracted from a compound user message."""
+    steps: List[CompoundAction] = Field(
+        default_factory=list,
+        description="Ordered list of atomic actions to execute sequentially."
+    )
 

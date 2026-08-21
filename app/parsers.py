@@ -11,6 +11,7 @@ from typing import Any, Optional, Tuple, Union
 from app.ai import generate_structured
 from app.schemas import (
     BatchTaskActionAnalysis,
+    CompoundPlan,
     DocumentAppendAnalysis,
     LearningRequest,
     LeetcodeReviewRequest,
@@ -34,7 +35,7 @@ STAGE1_SYSTEM_INSTRUCTION = (
     "- ROLLBACK: Undoing an action Ocean just performed, reverting a change Ocean just made, or correcting Ocean's own mistake from the last turn (e.g. 'undo that', 'revert', 'cancel last action', 'no, put them in reading list instead', 'undo last task'). Also use for compound rollback + reroute (e.g. 'no, delete those two tasks and put it in reading list'). Do NOT use ROLLBACK when the user wants to delete a specific named task — use TASK_ACTION for that.\n"
     "- DOCUMENT_APPEND: Adding or appending books, articles, notes, ideas, thoughts, bullets, or to-do items into existing Notion workspace pages or databases (e.g. 'add to my reading list: 1. The pragmatic programmer 2. A philosophy of software design', 'add Build AI voice agent to Ideas for projects', 'append to Year 1 Budget: Laptop insurance 200 USD', 'add note to Finances for Umass fall: Email bursar', 'put into Reading List: Clean Code').\n"
     "- TASKS: Creating single new tasks, querying pending or today's tasks, priority queries (e.g. 'high priority tasks'), and conversational follow-ups (e.g. 'others?', 'show more', 'next').\n"
-    "- TASK_ACTION: Modifying or deleting a specific existing task by name (e.g. 'mark Berkshire Dining done', 'done with GPAF form', 'postpone Berkshire Dining to next Tuesday', 'delete gemini shrine task', 'remove duplicate task', 'archive the CICS scholarship task'). Use this whenever the user names or describes a specific task to delete, archive, or update — even if they say 'delete that X task'.\n"
+    "- TASK_ACTION: Modifying or deleting a specific existing task by name (e.g. 'mark Berkshire Dining done', 'done with GPAF form', 'postpone Berkshire Dining to next Tuesday', 'delete gemini shrine task', 'remove duplicate task', 'archive the CICS scholarship task', 'set X to high priority'). Use this whenever the user names or describes a specific task to delete, archive, or update — even if they say 'delete that X task'.\n"
     "- BATCH_TASK_ACTION: Executing batch task commands across multiple tasks ('mark all UMass tasks as done', 'postpone all high priority items by 3 days', 'archive all completed tasks').\n"
     "- MEMORY_CONTROL: Memory governance, forgetting stale facts, updating long-term memory, or memory inspection commands ('forget grad school application notes', 'update memory: I am now a student at UMass', 'what do you remember about UMass?', 'forget X').\n"
     "- MIND: Substack drafts, journaling, brain dumps, rambling, daily reflections/logs, personal thoughts. NOTE: Short conversational follow-up questions (e.g. 'others?', 'what about tomorrow?') are NOT Mind entries; they belong to TASKS.\n"
@@ -43,6 +44,7 @@ STAGE1_SYSTEM_INSTRUCTION = (
     "- DIGEST: Requests for weekly velocity summaries, weekly review, or retrospective (e.g. 'how was my week?', 'weekly digest', 'weekly velocity', 'run weekly review').\n"
     "- MOTION: Strategic trajectory inquiries, mentorship questions, accountability check-ins, or explicit @motion requests ('@motion what is my biggest opportunity?', 'motion: evaluate my trajectory', 'strategic review of my projects', 'what are my biggest strategic risks?').\n"
     "- SEARCH: Inquiries querying past notes, search questions, folder exploration (e.g. 'what's in my notes?', 'what is in miscellaneous?', 'show my notes folder'), document inspection (e.g. 'what's in that year one budget?', 'tell me what's in finances for umass fall', 'did I write about finances for umass?'), archive suggestions (e.g. 'archive year one budget', 'send to archive'), or requests for information from the user's second brain.\n"
+    "- COMPOUND: A single message that clearly contains 2 or more distinct task-management actions that would each individually map to different modules (e.g. 'archive all Read & Annotate tasks, set X to high priority, and move these books to reading list', 'delete those tasks, set the other ones to low priority, and add these to reading list'). Use COMPOUND when the message is a multi-step cleanup or reorganisation instruction. Do NOT use for a single action even if complex.\n"
     "Pass the raw user message into the raw_text field."
 )
 
@@ -113,10 +115,11 @@ def parse_batch_task_action_stage2(text: str, context: Optional[str] = None) -> 
 
 STAGE2_TASK_ACTION_INSTRUCTION = (
     "Extract task modification details from the user message:\n"
-    "- action: MARK_DONE (e.g. 'done with X', 'mark X done', 'complete X'), MARK_IN_PROGRESS (e.g. 'set X to in progress', 'working on X'), UPDATE_DUE_DATE (e.g. 'postpone X to tuesday', 'move X to August 30', 'push X to tomorrow'), DELETE_TASK (e.g. 'delete X', 'remove X from tasks', 'archive X task').\n"
+    "- action: MARK_DONE (e.g. 'done with X', 'mark X done', 'complete X'), MARK_IN_PROGRESS (e.g. 'set X to in progress', 'working on X'), UPDATE_DUE_DATE (e.g. 'postpone X to tuesday', 'move X to August 30', 'push X to tomorrow'), DELETE_TASK (e.g. 'delete X', 'remove X from tasks', 'archive X task'), SET_PRIORITY (e.g. 'set X to high priority', 'make X low priority', 'mark X as urgent').\n"
     "- task_target_title: Target task title or keywords to match.\n"
     "- new_due_date_iso: Resolved due date in YYYY-MM-DD format if updating due date.\n"
     "- new_status_name: Done, In progress, or Not started.\n"
+    "- new_priority: High, Medium, or Low (if action is SET_PRIORITY).\n"
     "- ordinal_index: 1 for first task, 2 for second task, etc. if user referred to position."
 )
 
@@ -324,6 +327,31 @@ def parse_search_stage2(text: str, context: Optional[str] = None) -> SearchQuery
     )
 
 
+STAGE2_COMPOUND_INSTRUCTION = (
+    "Extract a multi-step compound plan from the user's message. The user has given multiple distinct task-management instructions in one message.\n"
+    "Return a CompoundPlan with a 'steps' list. Each step must have:\n"
+    "- action_type: One of BATCH_DELETE, ARCHIVE_TASK, TASK_SET_PRIO, BATCH_SET_PRIO, MOVE_TO_LIST.\n"
+    "- BATCH_DELETE: Archive all tasks matching a keyword pattern (set target_query to the keyword like 'Read & Annotate').\n"
+    "- ARCHIVE_TASK: Archive a single named task (set target_title to the task name).\n"
+    "- TASK_SET_PRIO: Set priority on a single named task (set target_title and priority: High/Medium/Low).\n"
+    "- BATCH_SET_PRIO: Set priority on multiple tasks matching a keyword (set target_query and priority: High/Medium/Low).\n"
+    "- MOVE_TO_LIST: Add items to a workspace list/database (set dest_target e.g. 'Reading List' and items list of titles).\n"
+    "Order steps logically. Extract all distinct actions mentioned in the message."
+)
+
+
+def parse_compound_stage2(text: str, context: Optional[str] = None) -> CompoundPlan:
+    """Stage 2: Parse COMPOUND module into a structured multi-step plan."""
+    fallback = CompoundPlan(steps=[])
+    return generate_structured(
+        prompt=text,
+        schema=CompoundPlan,
+        system_instruction=STAGE2_COMPOUND_INSTRUCTION,
+        context=context,
+        fallback_default=fallback,
+    )
+
+
 # ==========================================
 # --- Two-Stage Pipeline Orchestration ---
 # ==========================================
@@ -386,6 +414,9 @@ def analyze_user_text_two_stage(
         parsed = p_fn(raw_text, context=context) if context else p_fn(raw_text)
     elif module == "ROLLBACK":
         p_fn = get_fn("parse_rollback_stage2", parse_rollback_stage2)
+        parsed = p_fn(raw_text, context=context) if context else p_fn(raw_text)
+    elif module == "COMPOUND":
+        p_fn = get_fn("parse_compound_stage2", parse_compound_stage2)
         parsed = p_fn(raw_text, context=context) if context else p_fn(raw_text)
     elif module in ("DIGEST", "MOTION"):
         parsed = raw_text

@@ -339,6 +339,45 @@ def execute_task_action(
                 "reply_text": reply,
             }
 
+        # Action 5: SET_PRIORITY
+        elif action_type == TaskActionType.SET_PRIORITY:
+            priority_name = action_analysis.new_priority
+            if not priority_name:
+                return {
+                    "status": "error",
+                    "message": "Missing new_priority for SET_PRIORITY action.",
+                    "reply_text": f"⚠️ Could not set priority on **'{task_title}'** — no priority value provided.",
+                }
+            notion.client.pages.update(
+                page_id=page_id,
+                properties={"Priority": {"select": {"name": priority_name}}},
+            )
+            if user_id:
+                conversation_memory.record_mutation(
+                    sender_id=user_id,
+                    action_type="UPDATE_TASK",
+                    target_title=task_title,
+                    affected_items=[{"id": page_id, "title": task_title, "url": task_url, "type": "task"}],
+                    rollback_data={
+                        "page_id": page_id,
+                        "previous_priority": task.get("priority"),
+                    },
+                    summary=f"Set priority of {task_title} to {priority_name}",
+                )
+            priority_emoji = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(priority_name, "⚡")
+            reply = (
+                f"{priority_emoji} Priority updated!\n\n"
+                f"📌 **[{task_title}]({task_url})**\n"
+                f"⚡ Priority set to *{priority_name}*."
+            )
+            return {
+                "status": "ok",
+                "action": "SET_PRIORITY",
+                "task_title": task_title,
+                "task_url": task_url,
+                "reply_text": reply,
+            }
+
         else:
             return {
                 "status": "error",
@@ -430,3 +469,66 @@ def execute_batch_task_action(
         "reply_text": reply,
     }
 
+
+def execute_set_priority(
+    task_query: str,
+    priority: str,
+    notion_client: Optional[NotionAssistantClient] = None,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Standalone helper: set priority on a single fuzzy-matched task by title query.
+
+    Used by the compound service to execute TASK_SET_PRIO steps.
+    """
+    analysis = TaskActionAnalysis(
+        action="SET_PRIORITY",
+        task_target_title=task_query,
+        new_priority=priority,  # type: ignore[arg-type]
+    )
+    return execute_task_action(analysis, notion_client=notion_client, user_id=user_id)
+
+
+def execute_batch_set_priority(
+    target_query: str,
+    priority: str,
+    notion_client: Optional[NotionAssistantClient] = None,
+) -> Dict[str, Any]:
+    """Set priority on all pending tasks whose title contains target_query.
+
+    Used by the compound service to execute BATCH_SET_PRIO steps.
+    """
+    notion = notion_client or NotionAssistantClient()
+    if notion.client is None:
+        return {"status": "error", "reply_text": "❌ Notion not connected.", "count": 0}
+
+    pending = notion.get_pending(limit=100)
+    query_lower = target_query.strip().lower()
+    matched = [t for t in pending if query_lower in t.get("title", "").lower()] if query_lower else pending
+
+    if not matched:
+        return {
+            "status": "not_found",
+            "count": 0,
+            "reply_text": f"⚠️ No pending tasks found matching *'{target_query}'* to set priority.",
+        }
+
+    updated = []
+    for task in matched:
+        p_id = task.get("page_id")
+        try:
+            notion.client.pages.update(
+                page_id=p_id,
+                properties={"Priority": {"select": {"name": priority}}},
+            )
+            updated.append(task.get("title", "Untitled"))
+        except Exception as exc:
+            logger.warning("Batch set priority failed for page %s: %s", p_id, exc)
+
+    count = len(updated)
+    priority_emoji = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(priority, "⚡")
+    return {
+        "status": "ok",
+        "count": count,
+        "updated_titles": updated,
+        "reply_text": f"{priority_emoji} Set **{count}** task(s) to *{priority}* priority.",
+    }

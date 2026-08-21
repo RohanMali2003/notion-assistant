@@ -526,6 +526,18 @@ async def _handle_motion(parsed_result: Any, text: str, notion_client: NotionAss
     return motion_reply
 
 
+async def _handle_compound(parsed_result: Any, text: str, notion_client: NotionAssistantClient, sender_id: Optional[str]) -> str:
+    from app.compound_service import execute_compound_plan
+    compound_fn = _get_app_main_fn("execute_compound_plan", execute_compound_plan)
+    res = await run_in_threadpool(
+        compound_fn,
+        plan=parsed_result,
+        notion_client=notion_client,
+        sender_id=sender_id,
+    )
+    return res.get("reply_text", "Compound actions complete!")
+
+
 _ACTION_HANDLERS = {
     "MEMORY_CONTROL": _handle_memory_control,
     "BATCH_TASK_ACTION": _handle_batch_task_action,
@@ -538,6 +550,7 @@ _ACTION_HANDLERS = {
     "SEARCH": _handle_search,
     "DIGEST": _handle_digest,
     "MOTION": _handle_motion,
+    "COMPOUND": _handle_compound,
 }
 
 
