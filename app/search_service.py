@@ -6,14 +6,13 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-try:
-    from google import genai
-    from google.genai import types
-except ImportError:
-    genai = None
-    types = None
-
+from app.ai import DEFAULT_GEMINI_MODEL, generate_text, get_gemini_client, get_gemini_model
 from app.notion_client import NotionAssistantClient, clean_math_and_markdown
+from app.notion_utils import (
+    extract_page_title as _extract_page_title,
+    extract_page_url as _extract_page_url,
+)
+from app.notifier import send_notification
 from app.schemas import SearchQueryAnalysis, SearchResultItem
 from app.telegram_client import TelegramAssistantClient
 from app.whatsapp_client import WhatsAppAssistantClient
@@ -27,15 +26,8 @@ from app.workspace_service import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 
 
-def get_gemini_client():
-    """Create and return a google-genai Client instance."""
-    if genai is None:
-        raise RuntimeError("google-genai library is not installed or available")
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    return genai.Client(api_key=api_key) if api_key else genai.Client()
 
 
 SECOND_BRAIN_ANSWER_SYSTEM_INSTRUCTION = (
@@ -242,18 +234,24 @@ def answer_second_brain_question(
     )
 
     try:
-        response = client.models.generate_content(
-            model=os.getenv("GEMINI_SEARCH_MODEL", os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)),
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=SECOND_BRAIN_ANSWER_SYSTEM_INSTRUCTION,
-                temperature=0.2,
-            ),
+        model_target = os.getenv("GEMINI_SEARCH_MODEL", os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL))
+        answer_text = generate_text(
+            prompt=prompt,
+            system_instruction=SECOND_BRAIN_ANSWER_SYSTEM_INSTRUCTION,
+            model=model_target,
+            temperature=0.2,
+            fallback_default="",
         )
-        answer_text = response.text or ""
+        if not answer_text:
+            resp = client.models.generate_content(
+                model=model_target,
+                contents=prompt,
+            )
+            answer_text = resp.text or ""
     except Exception as exc:
         logger.error("Gemini Second-Brain QA synthesis failed (%s)", exc)
         answer_text = ""
+
 
     # Clean LaTeX math and markdown asterisks
     clean_ans = clean_math_and_markdown(answer_text, for_whatsapp=True)
@@ -358,18 +356,15 @@ def execute_second_brain_search_pipeline(
         result_payload = synthesis
 
     # Deliver via WhatsApp or Telegram
-    if to_phone and reply_text:
-        try:
-            whatsapp.send_message(to=to_phone, text=reply_text, preview_url=True)
-            logger.info("Sent WhatsApp Second-Brain response to %s", to_phone)
-        except Exception as wa_err:
-            logger.error("Failed to send WhatsApp Second-Brain response: %s", wa_err)
-
-    if chat_id and reply_text:
-        try:
-            telegram.send_message(text=reply_text, chat_id=str(chat_id))
-            logger.info("Sent Telegram Second-Brain response to %s", chat_id)
-        except Exception as tg_err:
-            logger.error("Failed to send Telegram Second-Brain response: %s", tg_err)
+    if reply_text:
+        send_notification(
+            reply_text,
+            to_phone=to_phone,
+            chat_id=chat_id,
+            preview_url=True,
+            whatsapp_client=whatsapp,
+            telegram_client=telegram,
+        )
 
     return result_payload
+

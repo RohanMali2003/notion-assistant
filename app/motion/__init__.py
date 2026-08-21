@@ -72,8 +72,10 @@ from app.motion.mentorship_service import (
 )
 from app.motion.review_service import MotionReviewService, motion_review_service
 from app.motion.router import PersonaRouter, persona_router
+from app.motion.api import motion_api_router
 
 __all__ = [
+    "motion_api_router",
     "BurnoutRiskLevel",
     "ConfidenceLevel",
     "DecisionStatus",
@@ -148,3 +150,4 @@ __all__ = [
     "PersonaRouter",
     "persona_router",
 ]
+

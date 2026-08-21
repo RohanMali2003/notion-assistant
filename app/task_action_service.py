@@ -200,6 +200,18 @@ def execute_task_action(
                 page_id=page_id,
                 properties={"Status": {"status": {"name": status_name}}},
             )
+            if user_id:
+                conversation_memory.record_mutation(
+                    sender_id=user_id,
+                    action_type="UPDATE_TASK",
+                    target_title=task_title,
+                    affected_items=[{"id": page_id, "title": task_title, "url": task_url, "type": "task"}],
+                    rollback_data={
+                        "page_id": page_id,
+                        "previous_status": task.get("status", "Not started"),
+                    },
+                    summary=f"Updated status of {task_title} to {status_name}",
+                )
             reply = (
                 f"✅ Marked task as **Done**!\n\n"
                 f"📌 **[{task_title}]({task_url})**\n"
@@ -230,6 +242,18 @@ def execute_task_action(
                 page_id=page_id,
                 properties={"Status": {"status": {"name": status_name}}},
             )
+            if user_id:
+                conversation_memory.record_mutation(
+                    sender_id=user_id,
+                    action_type="UPDATE_TASK",
+                    target_title=task_title,
+                    affected_items=[{"id": page_id, "title": task_title, "url": task_url, "type": "task"}],
+                    rollback_data={
+                        "page_id": page_id,
+                        "previous_status": task.get("status", "Not started"),
+                    },
+                    summary=f"Updated status of {task_title} to {status_name}",
+                )
             reply = (
                 f"🔄 Task set to **In progress**!\n\n"
                 f"📌 **[{task_title}]({task_url})**\n"
@@ -259,6 +283,18 @@ def execute_task_action(
                 page_id=page_id,
                 properties={"Due Date": {"date": {"start": resolved_date}}},
             )
+            if user_id:
+                conversation_memory.record_mutation(
+                    sender_id=user_id,
+                    action_type="UPDATE_TASK",
+                    target_title=task_title,
+                    affected_items=[{"id": page_id, "title": task_title, "url": task_url, "type": "task"}],
+                    rollback_data={
+                        "page_id": page_id,
+                        "previous_due_date": task.get("due_date"),
+                    },
+                    summary=f"Rescheduled {task_title} to {resolved_date}",
+                )
             reply = (
                 f"📅 Rescheduled task due date!\n\n"
                 f"📌 **[{task_title}]({task_url})**\n"
@@ -279,6 +315,17 @@ def execute_task_action(
                 page_id=page_id,
                 archived=True,
             )
+            if user_id:
+                conversation_memory.record_mutation(
+                    sender_id=user_id,
+                    action_type="DELETE_TASK",
+                    target_title=task_title,
+                    affected_items=[{"id": page_id, "title": task_title, "url": task_url, "type": "task"}],
+                    rollback_data={
+                        "page_id": page_id,
+                    },
+                    summary=f"Archived task {task_title}",
+                )
             reply = (
                 f"🗑️ Archived task!\n\n"
                 f"📌 **[{task_title}]({task_url})**\n"

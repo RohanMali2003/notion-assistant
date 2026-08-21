@@ -12,57 +12,14 @@ logger = logging.getLogger(__name__)
 CLEANUP_PAGE_TITLE = "🧹 Notion Cleanup & Duplicate Review"
 
 
-def _extract_page_title(page: Dict[str, Any]) -> str:
-    """Extract title from a Notion page properties object."""
-    props = page.get("properties", {})
-    for _, prop_val in props.items():
-        if isinstance(prop_val, dict) and prop_val.get("type") == "title":
-            title_list = prop_val.get("title", [])
-            if title_list:
-                return "".join(t.get("plain_text", "") for t in title_list).strip()
-    return "Untitled Page"
+from app.notion_utils import (
+    extract_page_title as _extract_page_title,
+    extract_page_url as _extract_page_url,
+    extract_page_status as _extract_status,
+    extract_page_due_date as _extract_due_date,
+    extract_page_tags as _extract_tags,
+)
 
-
-def _extract_page_url(page: Dict[str, Any]) -> str:
-    """Extract or construct full web URL for a Notion page."""
-    url = page.get("url")
-    if url:
-        return url
-    page_id = page.get("id", "")
-    clean_id = str(page_id).replace("-", "")
-    return f"https://www.notion.so/{clean_id}"
-
-
-def _extract_status(page: Dict[str, Any]) -> Optional[str]:
-    """Extract Status property from a page."""
-    props = page.get("properties", {})
-    for _, prop_val in props.items():
-        if isinstance(prop_val, dict) and prop_val.get("type") == "status":
-            status_obj = prop_val.get("status")
-            if isinstance(status_obj, dict):
-                return status_obj.get("name")
-    return None
-
-
-def _extract_due_date(page: Dict[str, Any]) -> Optional[str]:
-    """Extract Due date property from a page."""
-    props = page.get("properties", {})
-    for _, prop_val in props.items():
-        if isinstance(prop_val, dict) and prop_val.get("type") == "date":
-            date_obj = prop_val.get("date")
-            if isinstance(date_obj, dict):
-                return date_obj.get("start")
-    return None
-
-
-def _extract_tags(page: Dict[str, Any]) -> List[str]:
-    """Extract Tags multi-select property from a page."""
-    props = page.get("properties", {})
-    for _, prop_val in props.items():
-        if isinstance(prop_val, dict) and prop_val.get("type") == "multi_select":
-            ms_list = prop_val.get("multi_select", [])
-            return [item.get("name", "") for item in ms_list if isinstance(item, dict) and item.get("name")]
-    return []
 
 
 class NotionCleanupReporter:

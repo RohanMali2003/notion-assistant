@@ -2,20 +2,23 @@ import json
 import os
 import threading
 import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 CACHE_FILE_PATH = os.path.join("data", "session_cache.json")
 
 
 class ConversationMemory:
-    """Thread-safe persistent rolling conversational history and state tracker per sender."""
+    """Thread-safe persistent rolling conversational history, mutation audit stack, and state tracker per sender."""
 
     def __init__(self, max_history: int = 6, ttl_seconds: int = 86400, cache_file: str = CACHE_FILE_PATH):
         self._lock = threading.Lock()
         self._history: Dict[str, List[Dict[str, Any]]] = {}
         self._query_state: Dict[str, Dict[str, Any]] = {}
+        self._mutations: Dict[str, List[Dict[str, Any]]] = {}
         self._last_active: Dict[str, float] = {}
         self.max_history = max_history
+        self.max_mutations = 10
         self.ttl_seconds = ttl_seconds
         self.cache_file = cache_file
 
@@ -23,7 +26,7 @@ class ConversationMemory:
         self._load_disk_cache()
 
     def _load_disk_cache(self) -> None:
-        """Load session history and state from disk file on startup."""
+        """Load session history, mutations, and state from disk file on startup."""
         if not os.path.exists(self.cache_file):
             return
         try:
@@ -31,17 +34,19 @@ class ConversationMemory:
                 data = json.load(f)
                 self._history = data.get("history", {})
                 self._query_state = data.get("query_state", {})
+                self._mutations = data.get("mutations", {})
                 self._last_active = data.get("last_active", {})
         except Exception:
             pass
 
     def _save_disk_cache(self) -> None:
-        """Save session history and state to disk file."""
+        """Save session history, mutations, and state to disk file."""
         try:
             with open(self.cache_file, "w", encoding="utf-8") as f:
                 json.dump({
                     "history": self._history,
                     "query_state": self._query_state,
+                    "mutations": self._mutations,
                     "last_active": self._last_active,
                 }, f, ensure_ascii=False)
         except Exception:
@@ -56,6 +61,7 @@ class ConversationMemory:
         for s in expired_senders:
             self._history.pop(s, None)
             self._query_state.pop(s, None)
+            self._mutations.pop(s, None)
             self._last_active.pop(s, None)
 
     def add_user_message(self, sender_id: str, text: str) -> None:
@@ -180,15 +186,77 @@ class ConversationMemory:
                 self._query_state[sender_id].pop("pending_menu", None)
                 self._save_disk_cache()
 
+    def record_mutation(
+        self,
+        sender_id: str,
+        action_type: str,
+        target_title: str = "",
+        affected_items: Optional[List[Dict[str, Any]]] = None,
+        rollback_data: Optional[Dict[str, Any]] = None,
+        summary: str = "",
+    ) -> Dict[str, Any]:
+        """Record an atomic mutating side-effect (task created, row added, property modified) for rollback."""
+        if not sender_id:
+            return {}
+        now = time.time()
+        mutation_id = uuid.uuid4().hex[:8]
+        record = {
+            "mutation_id": mutation_id,
+            "timestamp": now,
+            "action_type": action_type,
+            "target_title": target_title,
+            "affected_items": affected_items or [],
+            "rollback_data": rollback_data or {},
+            "summary": summary or f"{action_type} on {target_title}",
+        }
+        with self._lock:
+            if sender_id not in self._mutations:
+                self._mutations[sender_id] = []
+            self._mutations[sender_id].append(record)
+            if len(self._mutations[sender_id]) > self.max_mutations:
+                self._mutations[sender_id] = self._mutations[sender_id][-self.max_mutations:]
+            self._save_disk_cache()
+        return record
+
+    def get_last_mutation(self, sender_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve the most recent mutation record for sender without popping."""
+        if not sender_id:
+            return None
+        with self._lock:
+            records = self._mutations.get(sender_id, [])
+            return dict(records[-1]) if records else None
+
+    def pop_last_mutation(self, sender_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve and remove the most recent mutation record for sender after rolling back."""
+        if not sender_id:
+            return None
+        with self._lock:
+            records = self._mutations.get(sender_id, [])
+            if records:
+                popped = records.pop()
+                self._save_disk_cache()
+                return popped
+            return None
+
+    def list_recent_mutations(self, sender_id: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """Retrieve list of recent mutation records for sender."""
+        if not sender_id:
+            return []
+        with self._lock:
+            records = self._mutations.get(sender_id, [])
+            return list(records[-limit:])
+
     def clear(self, sender_id: Optional[str] = None) -> None:
         with self._lock:
             if sender_id:
                 self._history.pop(sender_id, None)
                 self._query_state.pop(sender_id, None)
+                self._mutations.pop(sender_id, None)
                 self._last_active.pop(sender_id, None)
             else:
                 self._history.clear()
                 self._query_state.clear()
+                self._mutations.clear()
                 self._last_active.clear()
 
 

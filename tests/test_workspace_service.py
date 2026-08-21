@@ -300,3 +300,61 @@ def test_append_blocks_to_document_not_found():
         assert res["status"] == "not_found"
         assert "Could not locate document" in res["reply_text"]
 
+
+def test_add_entries_to_workspace_target_database():
+    from app.schemas import WorkspaceEntryItem
+    from app.workspace_service import add_entries_to_workspace_target
+
+    mock_notion = MagicMock()
+    mock_client = MagicMock()
+    mock_notion.client = mock_client
+
+    def mock_db_request(func, *args, **kwargs):
+        if "database_id" in kwargs and not kwargs.get("properties"):
+            # Database retrieve
+            return {
+                "id": "db-reading-list",
+                "properties": {
+                    "Title": {"type": "title"},
+                    "Status": {"type": "status", "status": {"options": [{"name": "Want to Read"}, {"name": "Read"}]}},
+                    "Author": {"type": "rich_text"},
+                },
+            }
+        elif kwargs.get("properties"):
+            # Page create in database
+            return {
+                "id": "page-book-1",
+                "url": "https://notion.so/book1",
+            }
+        return {}
+
+    mock_notion._request_with_retry.side_effect = mock_db_request
+
+    with patch("app.workspace_service.find_page_node_in_workspace") as mock_find:
+        mock_find.return_value = WorkspacePageNode(
+            id="page-reading-list",
+            title="Reading List",
+            parent_type="database_id",
+            is_container=True,
+            children_pages=[{"id": "db-reading-list", "title": "Reading List", "type": "database"}],
+        )
+
+        items = [
+            WorkspaceEntryItem(title="The Pragmatic Programmer", author="David Thomas"),
+            WorkspaceEntryItem(title="A Philosophy of Software Design", author="John Ousterhout"),
+        ]
+
+        res = add_entries_to_workspace_target(
+            target_query="Reading List",
+            items=items,
+            notion_client=mock_notion,
+            sender_id="test_user_reading",
+        )
+
+        assert res["status"] == "ok"
+        assert res["target_type"] == "database"
+        assert len(res["affected_items"]) == 2
+        assert "Added to Reading List" in res["reply_text"]
+        assert "The Pragmatic Programmer" in res["reply_text"]
+        assert "A Philosophy of Software Design" in res["reply_text"]
+

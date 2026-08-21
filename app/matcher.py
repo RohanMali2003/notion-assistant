@@ -1,14 +1,8 @@
-"""Ocean Entity Resolution Engine (3-Tier Cascade & Relative Date Parser).
-
-Tier 1: RapidFuzz WRatio (Fast C++ string distance for exact / substring matches)
-Tier 2: MiniLM Semantic Embeddings (all-MiniLM-L6-v2 vector cosine similarity)
-Tier 3: Gemini Flash Lite Fallback (LLM semantic disambiguation)
-"""
-
+import difflib
 import logging
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, List, Optional, Tuple, Union
 
 try:
@@ -37,6 +31,21 @@ except ImportError:
     types = None
 
 logger = logging.getLogger("notion-assistant.matcher")
+
+
+def _calc_similarity_score(s1: str, s2: str) -> float:
+    """Calculate string similarity score (0 to 100) using rapidfuzz or difflib fallback."""
+    if fuzz is not None and hasattr(fuzz, "WRatio"):
+        return float(fuzz.WRatio(s1, s2))
+    s1_clean = s1.strip().lower()
+    s2_clean = s2.strip().lower()
+    if not s1_clean or not s2_clean:
+        return 0.0
+    if s1_clean == s2_clean:
+        return 100.0
+    if s1_clean in s2_clean or s2_clean in s1_clean:
+        return 90.0
+    return difflib.SequenceMatcher(None, s1_clean, s2_clean).ratio() * 100.0
 
 
 class EntityResolver:
@@ -79,24 +88,28 @@ class EntityResolver:
 
         query_clean = query.strip()
 
-        # --- Tier 1: RapidFuzz WRatio ---
-        if process and fuzz:
-            top_matches = process.extract(query_clean, candidate_titles, limit=3, scorer=fuzz.WRatio)
-            if top_matches:
-                matched_title, score, match_idx = top_matches[0][0], float(top_matches[0][1]), int(top_matches[0][2])
+        # --- Tier 1: RapidFuzz / String Similarity ---
+        scored_candidates: List[Tuple[int, str, float]] = []
+        for idx, title in enumerate(candidate_titles):
+            score = _calc_similarity_score(query_clean, title)
+            scored_candidates.append((idx, title, score))
 
-                # Check if there is an ambiguous tie between top candidates
-                if len(top_matches) >= 2 and 60.0 <= score < 95.0:
-                    second_score = float(top_matches[1][1])
-                    if (score - second_score) <= 12.0:
-                        ambiguous_candidates = [candidates[int(m[2])] for m in top_matches if float(m[1]) >= 55.0]
-                        if len(ambiguous_candidates) >= 2:
-                            logger.info("Ambiguous match tie detected for query '%s': %s", query_clean, [extract_title(c) for c in ambiguous_candidates])
-                            return ambiguous_candidates[:3], "ambiguous_menu", score / 100.0
+        scored_candidates.sort(key=lambda x: x[2], reverse=True)
+        if scored_candidates:
+            best_idx, matched_title, best_score = scored_candidates[0]
 
-                if score >= rapidfuzz_threshold:
-                    logger.debug("Tier 1 RapidFuzz match: '%s' -> '%s' (score=%.1f)", query_clean, matched_title, score)
-                    return candidates[match_idx], "exact_or_rapidfuzz", score / 100.0
+            # Check for ambiguous tie between top candidates
+            if len(scored_candidates) >= 2 and 60.0 <= best_score < 95.0:
+                second_score = scored_candidates[1][2]
+                if (best_score - second_score) <= 12.0:
+                    ambiguous = [candidates[item[0]] for item in scored_candidates if item[2] >= 55.0]
+                    if len(ambiguous) >= 2:
+                        logger.info("Ambiguous match tie detected for query '%s'", query_clean)
+                        return ambiguous[:3], "ambiguous_menu", best_score / 100.0
+
+            if best_score >= rapidfuzz_threshold:
+                logger.debug("Tier 1 string similarity match: '%s' -> '%s' (score=%.1f)", query_clean, matched_title, best_score)
+                return candidates[best_idx], "exact_or_rapidfuzz", best_score / 100.0
 
         # --- Tier 2: MiniLM Semantic Embeddings ---
         model = self._get_embedding_model()
@@ -121,31 +134,29 @@ class EntityResolver:
                 logger.warning("Tier 2 MiniLM embedding resolution failed: %s", exc)
 
         # --- Tier 3: Gemini Flash Lite Fallback ---
-        if genai is not None:
-            try:
-                api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-                if api_key:
-                    client = genai.Client(api_key=api_key)
-                    prompt = (
-                        f"User said: '{query_clean}'\n\n"
-                        f"Candidate list:\n"
-                        + "\n".join(f"{idx}: {t}" for idx, t in enumerate(candidate_titles))
-                        + "\n\nReturn ONLY the integer index of the intended candidate, or -1 if no candidate matches."
-                    )
+        try:
+            from app.ai import get_gemini_client, get_gemini_model
+            client = get_gemini_client()
+            prompt = (
+                f"User said: '{query_clean}'\n\n"
+                f"Candidate list:\n"
+                + "\n".join(f"{idx}: {t}" for idx, t in enumerate(candidate_titles))
+                + "\n\nReturn ONLY the integer index of the intended candidate, or -1 if no candidate matches."
+            )
 
-                    response = client.models.generate_content(
-                        model="gemini-3.5-flash-lite",
-                        contents=prompt,
-                    )
-                    text_resp = (response.text or "").strip()
-                    match = re.search(r"-?\d+", text_resp)
-                    if match:
-                        idx = int(match.group(0))
-                        if 0 <= idx < len(candidates):
-                            logger.debug("Tier 3 Gemini match: '%s' -> '%s'", query_clean, candidate_titles[idx])
-                            return candidates[idx], "gemini_fallback", 0.90
-            except Exception as exc:
-                logger.warning("Tier 3 Gemini LLM fallback resolution failed: %s", exc)
+            response = client.models.generate_content(
+                model=get_gemini_model(),
+                contents=prompt,
+            )
+            text_resp = (response.text or "").strip()
+            match = re.search(r"-?\d+", text_resp)
+            if match:
+                idx = int(match.group(0))
+                if 0 <= idx < len(candidates):
+                    logger.debug("Tier 3 Gemini match: '%s' -> '%s'", query_clean, candidate_titles[idx])
+                    return candidates[idx], "gemini_fallback", 0.90
+        except Exception as exc:
+            logger.warning("Tier 3 Gemini LLM fallback resolution failed: %s", exc)
 
         return None, "not_found", 0.0
 
@@ -165,7 +176,6 @@ def resolve_natural_date(
         return clean_text
 
     # Built-in fast relative terms
-    from datetime import timedelta
     if clean_text in ("today", "tonight"):
         return ref.strftime("%Y-%m-%d")
     elif clean_text == "tomorrow":
@@ -174,6 +184,15 @@ def resolve_natural_date(
         return (ref + timedelta(days=2)).strftime("%Y-%m-%d")
     elif clean_text == "yesterday":
         return (ref - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # In X days / weeks / months
+    in_days = re.match(r"^in\s+(\d+)\s+days?$", clean_text)
+    if in_days:
+        return (ref + timedelta(days=int(in_days.group(1)))).strftime("%Y-%m-%d")
+
+    in_weeks = re.match(r"^in\s+(\d+)\s+weeks?$", clean_text)
+    if in_weeks:
+        return (ref + timedelta(weeks=int(in_weeks.group(1)))).strftime("%Y-%m-%d")
 
     weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
     for idx, day_name in enumerate(weekdays):
@@ -198,6 +217,7 @@ def resolve_natural_date(
             logger.warning("dateparser failed for '%s': %s", date_text, exc)
 
     return None
+
 
 
 # Global Singleton Instance

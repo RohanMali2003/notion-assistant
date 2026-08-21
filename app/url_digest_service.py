@@ -7,20 +7,13 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
-try:
-    from google import genai
-    from google.genai import types
-except ImportError:
-    genai = None
-    types = None
-
+from app.ai import DEFAULT_GEMINI_MODEL, generate_text, get_gemini_client, get_gemini_model
 from app.notion_client import NotionAssistantClient
 from app.tag_directory import CANONICAL_TAG_NAMES, match_closest_tag
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 URL_REGEX = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+
 
 
 def extract_urls(text: str) -> List[str]:
@@ -50,12 +43,9 @@ def is_url_dominant_message(text: str) -> bool:
     return len(words) <= 8
 
 
-def get_gemini_client():
-    """Create and return a google-genai Client instance."""
-    if genai is None:
-        raise RuntimeError("google-genai library is not installed or available")
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    return genai.Client(api_key=api_key) if api_key else genai.Client()
+from app.ai import DEFAULT_GEMINI_MODEL, get_gemini_client, get_gemini_model
+from app.notifier import send_notification
+
 
 
 def fetch_url_content(url: str, timeout: float = 10.0) -> Dict[str, Any]:
@@ -207,18 +197,25 @@ def summarize_and_log_url(
     )
 
     try:
-        response = client.models.generate_content(
-            model=os.getenv("GEMINI_URL_MODEL", os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)),
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=URL_SYNTHESIS_SYSTEM_INSTRUCTION,
-                temperature=0.2,
-            ),
+        model_target = os.getenv("GEMINI_URL_MODEL", os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL))
+        resp_text = generate_text(
+            prompt=prompt,
+            system_instruction=URL_SYNTHESIS_SYSTEM_INSTRUCTION,
+            model=model_target,
+            temperature=0.2,
+            fallback_default="",
         )
-        resp_text = response.text or ""
+        if not resp_text:
+            # Fallback direct call if generate_text yielded empty
+            resp = client.models.generate_content(
+                model=model_target,
+                contents=prompt,
+            )
+            resp_text = resp.text or ""
     except Exception as exc:
         logger.error("Gemini URL synthesis failed (%s). Using fallback.", exc)
         resp_text = ""
+
 
     # Parse fields from Gemini response
     title = fetched.get("title", url)
@@ -325,30 +322,19 @@ def execute_url_digest_background_pipeline(
     whatsapp = whatsapp_client
     telegram = telegram_client
 
-    if whatsapp is None and to_phone:
-        from app.whatsapp_client import WhatsAppAssistantClient
-        whatsapp = WhatsAppAssistantClient()
-
-    if telegram is None and chat_id:
-        from app.telegram_client import TelegramAssistantClient
-        telegram = TelegramAssistantClient()
-
     summary_data = summarize_and_log_url(url=url, user_comment=user_comment, notion_client=notion)
     reply_text = summary_data.get("reply_text", "")
     notion_url = summary_data.get("notion_url")
 
-    if to_phone and whatsapp and reply_text:
-        try:
-            whatsapp.send_message(to=to_phone, text=reply_text, preview_url=bool(notion_url))
-            logger.info("Sent WhatsApp URL digest for %s to %s", url, to_phone)
-        except Exception as wa_err:
-            logger.error("Failed to send WhatsApp URL digest: %s", wa_err)
-
-    if chat_id and telegram and reply_text:
-        try:
-            telegram.send_message(text=reply_text, chat_id=str(chat_id))
-            logger.info("Sent Telegram URL digest for %s to %s", url, chat_id)
-        except Exception as tg_err:
-            logger.error("Failed to send Telegram URL digest: %s", tg_err)
+    if reply_text:
+        send_notification(
+            reply_text,
+            to_phone=to_phone,
+            chat_id=chat_id,
+            preview_url=bool(notion_url),
+            whatsapp_client=whatsapp_client,
+            telegram_client=telegram_client,
+        )
 
     return summary_data
+

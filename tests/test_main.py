@@ -10,6 +10,7 @@ from app.main import (
     parse_learning_stage2,
     parse_leetcode_stage2,
     parse_mind_stage2,
+    parse_rollback_stage2,
     parse_task_action_stage2,
     parse_tasks_stage2,
 )
@@ -20,8 +21,11 @@ from app.schemas import (
     MindEntry,
     ModuleClassification,
     ReminderItem,
+    RollbackAnalysis,
     TaskActionAnalysis,
     TaskAnalysis,
+    WorkspaceEntryItem,
+    WorkspaceIngestAnalysis,
 )
 
 
@@ -1086,10 +1090,10 @@ def test_webhook_telegram_task_action_integration(mock_genai_cls, mock_tg_cls, m
     mock_tg_inst.send_message.assert_called_once()
 
 
-@patch("app.main.append_blocks_to_document")
+@patch("app.main.add_entries_to_workspace_target")
 @patch("app.main.TelegramAssistantClient")
 @patch("app.main.genai.Client")
-def test_webhook_telegram_document_append_integration(mock_genai_cls, mock_tg_cls, mock_append, env_setup):
+def test_webhook_telegram_document_append_integration(mock_genai_cls, mock_tg_cls, mock_add_entries, env_setup):
     mock_genai_inst = MagicMock()
     stage1_resp = MagicMock()
     stage1_resp.parsed = ModuleClassification(module="DOCUMENT_APPEND", raw_text="Add idea to Ideas for projects")
@@ -1099,7 +1103,7 @@ def test_webhook_telegram_document_append_integration(mock_genai_cls, mock_tg_cl
     mock_genai_inst.models.generate_content.side_effect = [stage1_resp, stage2_resp]
     mock_genai_cls.return_value = mock_genai_inst
 
-    mock_append.return_value = {
+    mock_add_entries.return_value = {
         "status": "ok",
         "reply_text": "📝 *Appended to Note!*",
     }
@@ -1124,8 +1128,101 @@ def test_webhook_telegram_document_append_integration(mock_genai_cls, mock_tg_cl
     )
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
-    mock_append.assert_called_once()
+    mock_add_entries.assert_called_once()
     mock_tg_inst.send_message.assert_called_once()
+
+
+@patch("app.main.execute_rollback")
+@patch("app.main.TelegramAssistantClient")
+@patch("app.main.genai.Client")
+def test_webhook_telegram_rollback_integration(mock_genai_cls, mock_tg_cls, mock_rollback, env_setup):
+    mock_genai_inst = MagicMock()
+    stage1_resp = MagicMock()
+    stage1_resp.parsed = ModuleClassification(module="ROLLBACK", raw_text="undo that")
+
+    stage2_resp = MagicMock()
+    stage2_resp.parsed = RollbackAnalysis(command="ROLLBACK_LAST")
+    mock_genai_inst.models.generate_content.side_effect = [stage1_resp, stage2_resp]
+    mock_genai_cls.return_value = mock_genai_inst
+
+    mock_rollback.return_value = {
+        "status": "ok",
+        "reply_text": "🔄 *Rolled Back Last Action!*",
+    }
+
+    mock_tg_inst = MagicMock()
+    mock_tg_cls.return_value = mock_tg_inst
+
+    from app.main import app
+    client = TestClient(app)
+    payload = {
+        "update_id": 12,
+        "message": {
+            "message_id": 22,
+            "text": "undo that",
+            "chat": {"id": 8888}
+        }
+    }
+    response = client.post(
+        "/webhook/telegram",
+        json=payload,
+        headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    mock_rollback.assert_called_once()
+    mock_tg_inst.send_message.assert_called_once()
+
+
+@patch("app.main.execute_rollback")
+@patch("app.main.TelegramAssistantClient")
+@patch("app.main.genai.Client")
+def test_webhook_telegram_compound_correction_integration(mock_genai_cls, mock_tg_cls, mock_rollback, env_setup):
+    mock_genai_inst = MagicMock()
+    stage1_resp = MagicMock()
+    stage1_resp.parsed = ModuleClassification(module="ROLLBACK", raw_text="no, delete those two tasks and put it in reading list")
+
+    stage2_resp = MagicMock()
+    stage2_resp.parsed = RollbackAnalysis(
+        command="CORRECTION_AND_REROUTE",
+        new_target_title="Reading List",
+        correction_instruction="no, delete those two tasks and put it in reading list",
+        extracted_items=["The Pragmatic Programmer", "A Philosophy of Software Design"],
+    )
+    mock_genai_inst.models.generate_content.side_effect = [stage1_resp, stage2_resp]
+    mock_genai_cls.return_value = mock_genai_inst
+
+    mock_rollback.return_value = {
+        "status": "ok",
+        "reply_text": "🗑️ *Deleted Mistaken Tasks:*\n• ~Task 1~\n• ~Task 2~\n\n📚 *Added to Reading List!*",
+    }
+
+    mock_tg_inst = MagicMock()
+    mock_tg_cls.return_value = mock_tg_inst
+
+    from app.main import app
+    client = TestClient(app)
+    payload = {
+        "update_id": 13,
+        "message": {
+            "message_id": 23,
+            "text": "no, delete those two tasks and put it in reading list",
+            "chat": {"id": 8888}
+        }
+    }
+    response = client.post(
+        "/webhook/telegram",
+        json=payload,
+        headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    mock_rollback.assert_called_once()
+    mock_tg_inst.send_message.assert_called_once()
+    sent_text = mock_tg_inst.send_message.call_args[1]["text"]
+    assert "Deleted Mistaken Tasks" in sent_text
+    assert "Added to Reading List" in sent_text
+
 
 
 

@@ -92,3 +92,42 @@ async def test_handle_module_action_pagination():
     # Check updated offset in state
     state = conversation_memory.get_last_query_state(sender)
     assert state.get("last_offset") == 5
+
+
+def test_conversation_memory_mutations():
+    mem = ConversationMemory()
+    sender = "mutation_test_user"
+    mem.clear(sender)
+
+    mem.record_mutation(
+        sender_id=sender,
+        action_type="CREATE_TASK",
+        target_title="Task A",
+        affected_items=[{"id": "p1", "title": "Task A"}],
+        summary="Created task A",
+    )
+    mem.record_mutation(
+        sender_id=sender,
+        action_type="WORKSPACE_INGEST",
+        target_title="Reading List",
+        affected_items=[{"id": "p2", "title": "Book B"}],
+        summary="Added Book B",
+    )
+
+    recent = mem.list_recent_mutations(sender)
+    assert len(recent) == 2
+
+    last = mem.get_last_mutation(sender)
+    assert last is not None
+    assert last["target_title"] == "Reading List"
+
+    popped = mem.pop_last_mutation(sender)
+    assert popped is not None
+    assert popped["target_title"] == "Reading List"
+
+    remaining = mem.get_last_mutation(sender)
+    assert remaining is not None
+    assert remaining["target_title"] == "Task A"
+
+    mem.clear(sender)
+    assert mem.get_last_mutation(sender) is None

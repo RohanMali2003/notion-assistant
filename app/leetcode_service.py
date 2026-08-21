@@ -7,13 +7,13 @@ import httpx
 
 try:
     from google import genai
-    from google.genai import types
 except ImportError:
     genai = None
-    types = None
 
+from app.ai import DEFAULT_GEMINI_MODEL, generate_text, get_gemini_client, get_genai_types
 from app.config import settings
 from app.notion_client import NotionAssistantClient
+from app.notifier import send_notification
 from app.schemas import (
     LeetcodeCommitData,
     LeetcodeProblemDetails,
@@ -25,21 +25,15 @@ from app.whatsapp_client import WhatsAppAssistantClient
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
+
 LEETCODE_GRAPHQL_URL = "https://leetcode.com/graphql"
-
-
-def get_gemini_client():
-    """Create and return a google-genai Client instance."""
-    if genai is None:
-        raise RuntimeError("google-genai library is not installed or available")
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    return genai.Client(api_key=api_key) if api_key else genai.Client()
 
 
 def get_gemini_model() -> str:
     """Return the Gemini model identifier for LeetCode code review."""
     return os.getenv("GEMINI_LEETCODE_MODEL", os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL))
+
+
 
 
 # --- Step 1: Parsing LeetHub Commit Data & GitHub Integration ---
@@ -529,15 +523,16 @@ def generate_leetcode_review(
     model_name = get_gemini_model()
 
     try:
-        response = client.models.generate_content(
+        resp_text = generate_text(
+            prompt=prompt,
+            system_instruction=LEETCODE_REVIEW_SYSTEM_INSTRUCTION,
             model=model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=LEETCODE_REVIEW_SYSTEM_INSTRUCTION,
-                temperature=0.2,
-            ),
+            temperature=0.2,
+            fallback_default="",
+            client=client,
         )
-        resp_text = response.text or ""
+
+
 
         # Parse structured components from Gemini response text
         verdict = "Correct"
@@ -756,19 +751,15 @@ def execute_leetcode_background_pipeline(
     follow_up_message = clean_math_and_markdown("\n".join(msg_lines).strip(), for_whatsapp=True)
 
     # Step 6: Send finished review back to WhatsApp / Telegram
-    if to_phone:
-        try:
-            whatsapp.send_message(to=to_phone, text=follow_up_message, preview_url=bool(notion_url))
-            logger.info("Sent LeetCode review follow-up to WhatsApp (to=%s)", to_phone)
-        except Exception as wa_err:
-            logger.error("Failed to send WhatsApp follow-up: %s", wa_err)
+    send_notification(
+        follow_up_message,
+        to_phone=to_phone,
+        chat_id=chat_id,
+        preview_url=bool(notion_url),
+        whatsapp_client=whatsapp,
+        telegram_client=telegram,
+    )
 
-    if chat_id:
-        try:
-            telegram.send_message(text=follow_up_message, chat_id=str(chat_id))
-            logger.info("Sent LeetCode review follow-up to Telegram (chat_id=%s)", chat_id)
-        except Exception as tg_err:
-            logger.error("Failed to send Telegram follow-up: %s", tg_err)
 
     return {
         "status": "ok",

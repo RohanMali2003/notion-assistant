@@ -21,6 +21,9 @@ def test_rapidfuzz_tier1_match():
 
 
 def test_minilm_semantic_tier2_match():
+    if entity_resolver._get_embedding_model() is None:
+        pytest.skip("SentenceTransformer model is not available in current environment")
+
     candidates = [
         {"title": "Pay Berkshire Dining Hall bill"},
         {"title": "Submit CICS scholarship app"},
@@ -34,6 +37,7 @@ def test_minilm_semantic_tier2_match():
     assert matched is not None
     assert matched["title"] == "Pay Berkshire Dining Hall bill"
     assert tier in ("exact_or_rapidfuzz", "minilm_embedding")
+
 
 
 def test_natural_date_resolution():

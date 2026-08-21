@@ -4,14 +4,9 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
-try:
-    from google import genai
-    from google.genai import types
-except ImportError:
-    genai = None
-    types = None
-
+from app.ai import DEFAULT_GEMINI_MODEL, get_gemini_client, get_genai_types
 from app.notion_client import NotionAssistantClient
+from app.notifier import send_notification
 from app.schemas import (
     LEARNING_TAG,
     LearningPlanSynthesis,
@@ -24,20 +19,13 @@ from app.whatsapp_client import WhatsAppAssistantClient
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
-
-
-def get_gemini_client():
-    """Create and return a google-genai Client instance."""
-    if genai is None:
-        raise RuntimeError("google-genai library is not installed or available")
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    return genai.Client(api_key=api_key) if api_key else genai.Client()
 
 
 def get_gemini_model() -> str:
     """Return the Gemini model identifier for grounding synthesis."""
     return os.getenv("GEMINI_GROUNDING_MODEL", os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL))
+
+
 
 
 # --- Step 2: Link Verification & Resource Type Inference ---
@@ -292,39 +280,42 @@ def compile_learning_curriculum(learning_req: LearningRequest) -> LearningPlanSy
     client = get_gemini_client()
     model_name = get_gemini_model()
     response = None
+    gen_types = get_genai_types()
 
     # 1. Attempt with Search Grounding if configured
-    try:
-        afc_config = (
-            types.AutomaticFunctionCallingConfig(disable=True)
-            if hasattr(types, "AutomaticFunctionCallingConfig")
-            else None
-        )
-        config = types.GenerateContentConfig(
-            system_instruction=GROUNDING_SYSTEM_INSTRUCTION,
-            tools=[types.Tool(google_search=types.GoogleSearch())],
-            automatic_function_calling=afc_config,
-            temperature=0.2,
-        )
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt,
-            config=config,
-        )
-    except Exception as ground_err:
-        logger.warning(
-            "Search grounding tool call failed (%s). Falling back to direct Gemini knowledge synthesis.",
-            ground_err,
-        )
+    if gen_types is not None:
+        try:
+            afc_config = (
+                gen_types.AutomaticFunctionCallingConfig(disable=True)
+                if hasattr(gen_types, "AutomaticFunctionCallingConfig")
+                else None
+            )
+            config = gen_types.GenerateContentConfig(
+                system_instruction=GROUNDING_SYSTEM_INSTRUCTION,
+                tools=[gen_types.Tool(google_search=gen_types.GoogleSearch())],
+                automatic_function_calling=afc_config,
+                temperature=0.2,
+            )
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=config,
+            )
+        except Exception as ground_err:
+            logger.warning(
+                "Search grounding tool call failed (%s). Falling back to direct Gemini knowledge synthesis.",
+                ground_err,
+            )
 
     # 2. If search grounding failed or was skipped, call direct Gemini model
     if response is None or not (response.text or "").strip():
         try:
-            config_direct = types.GenerateContentConfig(
-                system_instruction=GROUNDING_SYSTEM_INSTRUCTION,
-                automatic_function_calling=afc_config,
-                temperature=0.2,
-            )
+            config_direct = None
+            if gen_types is not None:
+                config_direct = gen_types.GenerateContentConfig(
+                    system_instruction=GROUNDING_SYSTEM_INSTRUCTION,
+                    temperature=0.2,
+                )
             response = client.models.generate_content(
                 model=model_name,
                 contents=prompt,
@@ -332,6 +323,7 @@ def compile_learning_curriculum(learning_req: LearningRequest) -> LearningPlanSy
             )
         except Exception as direct_err:
             logger.error("Direct Gemini curriculum generation failed: %s", direct_err)
+
 
     if response and (response.text or "").strip():
         text_content = response.text or ""
@@ -534,19 +526,15 @@ def execute_learning_background_pipeline(
         logger.debug("Motion evidence ingestion skipped: %s", err)
 
     # Send completion message
-    if to_phone:
-        try:
-            whatsapp.send_message(to=to_phone, text=completion_message, preview_url=True)
-            logger.info("Sent learning completion message to WhatsApp (to=%s)", to_phone)
-        except Exception as wa_err:
-            logger.error("Failed to send completion message to WhatsApp: %s", wa_err)
+    send_notification(
+        completion_message,
+        to_phone=to_phone,
+        chat_id=chat_id,
+        preview_url=True,
+        whatsapp_client=whatsapp,
+        telegram_client=telegram,
+    )
 
-    if chat_id:
-        try:
-            telegram.send_message(text=completion_message, chat_id=str(chat_id))
-            logger.info("Sent learning completion message to Telegram (chat_id=%s)", chat_id)
-        except Exception as tg_err:
-            logger.error("Failed to send completion message to Telegram: %s", tg_err)
 
     return {
         "status": "ok",

@@ -15,28 +15,12 @@ import sqlite3
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-try:
-    from google import genai
-    from google.genai import types
-except ImportError:
-    genai = None
-    types = None
+from contextlib import contextmanager
+from app.ai import DEFAULT_GEMINI_MODEL, get_gemini_client, get_gemini_model, get_genai_types
 
 logger = logging.getLogger("notion-assistant.graph_memory")
-
 DEFAULT_DB_PATH = os.path.join("data", "ocean_graph.db")
-DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 
-
-def get_gemini_client():
-    """Create and return a google-genai Client instance."""
-    if genai is None:
-        raise RuntimeError("google-genai library is not installed or available")
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    return genai.Client(api_key=api_key) if api_key else genai.Client()
-
-
-from contextlib import contextmanager
 
 
 class GraphMemoryService:
@@ -295,11 +279,14 @@ class GraphMemoryService:
         source_module: str = "MIND",
     ) -> Dict[str, Any]:
         """Background LLM Task: Automatically extract entities, relationships, and superseded topics from text."""
-        if not text or genai is None:
+        if not text:
             return {"extracted_count": 0}
 
         try:
             client = get_gemini_client()
+            if client is None:
+                return {"extracted_count": 0}
+
             prompt = (
                 f"Analyze the following text logged via '{source_module}' and extract key Knowledge Graph entities, relationships, and obsolete topic patterns:\n\n"
                 f"Text: '{text}'\n\n"
@@ -309,15 +296,18 @@ class GraphMemoryService:
                 "- superseded_patterns: list of strings (older topic patterns replaced by this news)"
             )
 
+            gen_types = get_genai_types()
+            cfg = None
+            if gen_types is not None:
+                cfg = gen_types.GenerateContentConfig(response_mime_type="application/json")
             response = client.models.generate_content(
                 model=DEFAULT_GEMINI_MODEL,
                 contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                ),
+                config=cfg,
             )
 
             data = json.loads(response.text or "{}")
+
             extracted_nodes = []
 
             for ent in data.get("entities", []):
@@ -354,7 +344,8 @@ class GraphMemoryService:
             return {"status": "error", "message": "Notion client not connected."}
 
         try:
-            from app.workspace_service import find_page_node_in_workspace, _build_notion_block
+            from app.notion_utils import build_notion_block
+            from app.workspace_service import find_page_node_in_workspace
 
             # 1. Locate or create Knowledge Graph container page
             kg_node = find_page_node_in_workspace("Knowledge Graph", notion_client=notion_client)

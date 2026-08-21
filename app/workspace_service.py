@@ -14,39 +14,30 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-try:
-    from google import genai
-    from google.genai import types
-except ImportError:
-    genai = None
-    types = None
-
+from app.ai import generate_text, get_gemini_client, get_gemini_model
 from app.config import settings
 from app.matcher import entity_resolver
+from app.memory import conversation_memory
 from app.notion_client import NotionAssistantClient, clean_math_and_markdown
+from app.notion_utils import (
+    build_notion_block as _build_notion_block,
+    create_bullet_block as _create_bullet_block,
+    create_paragraph_block as _create_paragraph_block,
+    create_todo_block as _create_todo_block,
+    extract_page_title as _extract_page_title,
+    extract_page_url as _extract_page_url,
+)
 from app.schemas import (
+    DocumentAppendAnalysis,
     FolderExploreResult,
     PageInspectResult,
     SearchResultItem,
+    WorkspaceEntryItem,
+    WorkspaceIngestAnalysis,
     WorkspacePageNode,
 )
 
 logger = logging.getLogger("notion-assistant.workspace")
-
-DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
-
-
-def get_gemini_client():
-    """Create and return a google-genai Client instance."""
-    if genai is None:
-        raise RuntimeError("google-genai library is not installed or available")
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    return genai.Client(api_key=api_key) if api_key else genai.Client()
-
-
-def get_gemini_model() -> str:
-    """Return configured Gemini model name."""
-    return os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
 
 # --- In-Memory Dynamic Workspace Cache ---
 _WORKSPACE_CACHE: Dict[str, Any] = {
@@ -57,30 +48,139 @@ _WORKSPACE_CACHE: Dict[str, Any] = {
 }
 
 
-def _extract_page_title(page: Dict[str, Any]) -> str:
-    """Extract page plain text title from Notion properties or child_page block."""
-    props = page.get("properties", {})
-    for key, val in props.items():
-        if isinstance(val, dict) and val.get("type") == "title":
-            title_objs = val.get("title", [])
-            title_text = "".join(t.get("plain_text", "") for t in title_objs).strip()
-            if title_text:
-                return title_text
-    # Fallback to direct title field if database or block
-    if "title" in page and isinstance(page["title"], list):
-        return "".join(t.get("plain_text", "") for t in page["title"]).strip()
-    if "child_page" in page and isinstance(page["child_page"], dict):
-        return page["child_page"].get("title", "").strip()
-    return ""
+def _index_initial_search_nodes(results: List[Dict[str, Any]]) -> Tuple[Dict[str, WorkspacePageNode], Dict[str, str]]:
+    """Index top-level search results into workspace node mapping."""
+    nodes_by_id: Dict[str, WorkspacePageNode] = {}
+    nodes_by_title: Dict[str, str] = {}
+    for item in results:
+        item_id = item.get("id")
+        if not item_id:
+            continue
+        title = _extract_page_title(item)
+        if not title:
+            continue
+        url = _extract_page_url(item)
+        parent = item.get("parent", {})
+        p_type = parent.get("type", "workspace")
+        p_id = parent.get(f"{p_type}_id", parent.get("page_id", parent.get("database_id", parent.get("block_id"))))
+        last_edited = item.get("last_edited_time")
+
+        node = WorkspacePageNode(
+            id=item_id,
+            title=title,
+            url=url,
+            parent_type=p_type,
+            parent_id=p_id,
+            last_edited_time=last_edited,
+        )
+        nodes_by_id[item_id] = node
+        nodes_by_title[title.lower()] = item_id
+    return nodes_by_id, nodes_by_title
 
 
-def _extract_page_url(page: Dict[str, Any]) -> str:
-    """Extract public/workspace URL for a Notion page."""
-    url = page.get("url", "")
-    if url:
-        return url
-    page_id = page.get("id", "").replace("-", "")
-    return f"https://app.notion.com/p/{page_id}" if page_id else ""
+def _discover_child_container_nodes(notion: NotionAssistantClient, nodes_by_id: Dict[str, WorkspacePageNode], nodes_by_title: Dict[str, str]) -> None:
+    """Discover child pages and databases under container pages."""
+    for node_id, node in list(nodes_by_id.items()):
+        if node.parent_type not in ("workspace", "page_id", "block_id"):
+            continue
+        try:
+            blocks_res = notion._request_with_retry(
+                notion.client.blocks.children.list,
+                block_id=node_id,
+                page_size=50,
+            )
+            child_blocks = blocks_res.get("results", [])
+            has_children = False
+            for b in child_blocks:
+                b_type = b.get("type")
+                b_id = b.get("id")
+                if b_type == "child_page":
+                    child_title = b.get("child_page", {}).get("title", "")
+                    if child_title:
+                        has_children = True
+                        child_url = f"https://app.notion.com/p/{b_id.replace('-', '')}" if b_id else ""
+                        node.children_pages.append({
+                            "id": b_id,
+                            "title": child_title,
+                            "url": child_url,
+                            "type": "page",
+                        })
+                        if b_id and b_id not in nodes_by_id:
+                            child_node = WorkspacePageNode(
+                                id=b_id,
+                                title=child_title,
+                                url=child_url,
+                                parent_type="page_id",
+                                parent_id=node_id,
+                            )
+                            nodes_by_id[b_id] = child_node
+                            nodes_by_title[child_title.lower()] = b_id
+                elif b_type == "child_database":
+                    child_title = b.get("child_database", {}).get("title", "")
+                    if child_title:
+                        has_children = True
+                        db_url = f"https://app.notion.com/p/{b_id.replace('-', '')}" if b_id else ""
+                        node.children_pages.append({
+                            "id": b_id,
+                            "title": child_title,
+                            "url": db_url,
+                            "type": "database",
+                        })
+                        db_node = nodes_by_id.get(b_id)
+                        if not db_node:
+                            db_node = WorkspacePageNode(
+                                id=b_id,
+                                title=child_title,
+                                url=db_url,
+                                parent_type="page_id",
+                                parent_id=node_id,
+                                is_container=True,
+                            )
+                            nodes_by_id[b_id] = db_node
+                            nodes_by_title[child_title.lower()] = b_id
+
+                        try:
+                            db_rows = notion._query_database(database_id=b_id, page_size=50)
+                            for r in db_rows.get("results", []):
+                                r_id = r.get("id")
+                                r_title = _extract_page_title(r)
+                                r_url = _extract_page_url(r)
+                                if r_id and r_title:
+                                    db_node.children_pages.append({
+                                        "id": r_id,
+                                        "title": r_title,
+                                        "url": r_url,
+                                        "type": "doc",
+                                    })
+                                    if r_id not in nodes_by_id:
+                                        nodes_by_id[r_id] = WorkspacePageNode(
+                                            id=r_id,
+                                            title=r_title,
+                                            url=r_url,
+                                            parent_type="database_id",
+                                            parent_id=b_id,
+                                            last_edited_time=r.get("last_edited_time"),
+                                        )
+                                        nodes_by_title[r_title.lower()] = r_id
+                        except Exception as dbr_err:
+                            logger.debug("Failed to query rows for child_database %s (%s): %s", child_title, b_id, dbr_err)
+            node.is_container = has_children
+        except Exception as b_err:
+            logger.debug("Could not list blocks for node %s: %s", node_id, b_err)
+
+
+def _compute_graph_breadcrumbs(nodes_by_id: Dict[str, WorkspacePageNode]) -> None:
+    """Compute and attach hierarchical breadcrumbs for all indexed workspace nodes."""
+    for node in nodes_by_id.values():
+        crumb_parts = [node.title]
+        curr_parent_id = node.parent_id
+        visited = {node.id}
+        while curr_parent_id and curr_parent_id in nodes_by_id and curr_parent_id not in visited:
+            visited.add(curr_parent_id)
+            parent_node = nodes_by_id[curr_parent_id]
+            crumb_parts.insert(0, parent_node.title)
+            curr_parent_id = parent_node.parent_id
+        node.breadcrumb = " > ".join(crumb_parts)
 
 
 def build_workspace_hierarchy_graph(
@@ -97,145 +197,17 @@ def build_workspace_hierarchy_graph(
     if not notion.client:
         return {}
 
-    nodes_by_id: Dict[str, WorkspacePageNode] = {}
-    nodes_by_title: Dict[str, str] = {}
-
     try:
-        # 1. Search for all accessible pages and databases
         search_res = notion._request_with_retry(
             notion.client.search,
             page_size=100,
         )
         results = search_res.get("results", [])
 
-        for item in results:
-            item_id = item.get("id")
-            if not item_id:
-                continue
-            title = _extract_page_title(item)
-            if not title:
-                continue
-            url = _extract_page_url(item)
-            parent = item.get("parent", {})
-            p_type = parent.get("type", "workspace")
-            p_id = parent.get(f"{p_type}_id", parent.get("page_id", parent.get("database_id", parent.get("block_id"))))
-            last_edited = item.get("last_edited_time")
+        nodes_by_id, nodes_by_title = _index_initial_search_nodes(results)
+        _discover_child_container_nodes(notion, nodes_by_id, nodes_by_title)
+        _compute_graph_breadcrumbs(nodes_by_id)
 
-            node = WorkspacePageNode(
-                id=item_id,
-                title=title,
-                url=url,
-                parent_type=p_type,
-                parent_id=p_id,
-                last_edited_time=last_edited,
-            )
-            nodes_by_id[item_id] = node
-            nodes_by_title[title.lower()] = item_id
-
-        # 2. Discover child pages under standalone/container pages
-        for node_id, node in list(nodes_by_id.items()):
-            if node.parent_type in ("workspace", "page_id", "block_id"):
-                try:
-                    blocks_res = notion._request_with_retry(
-                        notion.client.blocks.children.list,
-                        block_id=node_id,
-                        page_size=50,
-                    )
-                    child_blocks = blocks_res.get("results", [])
-                    has_children = False
-                    for b in child_blocks:
-                        b_type = b.get("type")
-                        b_id = b.get("id")
-                        if b_type == "child_page":
-                            child_title = b.get("child_page", {}).get("title", "")
-                            if child_title:
-                                has_children = True
-                                child_url = f"https://app.notion.com/p/{b_id.replace('-', '')}" if b_id else ""
-                                node.children_pages.append({
-                                    "id": b_id,
-                                    "title": child_title,
-                                    "url": child_url,
-                                    "type": "page",
-                                })
-                                # Register child node if not already present
-                                if b_id and b_id not in nodes_by_id:
-                                    child_node = WorkspacePageNode(
-                                        id=b_id,
-                                        title=child_title,
-                                        url=child_url,
-                                        parent_type="page_id",
-                                        parent_id=node_id,
-                                    )
-                                    nodes_by_id[b_id] = child_node
-                                    nodes_by_title[child_title.lower()] = b_id
-                        elif b_type == "child_database":
-                            child_title = b.get("child_database", {}).get("title", "")
-                            if child_title:
-                                has_children = True
-                                db_url = f"https://app.notion.com/p/{b_id.replace('-', '')}" if b_id else ""
-                                node.children_pages.append({
-                                    "id": b_id,
-                                    "title": child_title,
-                                    "url": db_url,
-                                    "type": "database",
-                                })
-                                # Register child database node
-                                db_node = nodes_by_id.get(b_id)
-                                if not db_node:
-                                    db_node = WorkspacePageNode(
-                                        id=b_id,
-                                        title=child_title,
-                                        url=db_url,
-                                        parent_type="page_id",
-                                        parent_id=node_id,
-                                        is_container=True,
-                                    )
-                                    nodes_by_id[b_id] = db_node
-                                    nodes_by_title[child_title.lower()] = b_id
-
-                                # Query database rows and index them under the database
-                                try:
-                                    db_rows = notion._query_database(database_id=b_id, page_size=50)
-                                    for r in db_rows.get("results", []):
-                                        r_id = r.get("id")
-                                        r_title = _extract_page_title(r)
-                                        r_url = _extract_page_url(r)
-                                        if r_id and r_title:
-                                            db_node.children_pages.append({
-                                                "id": r_id,
-                                                "title": r_title,
-                                                "url": r_url,
-                                                "type": "doc",
-                                            })
-                                            if r_id not in nodes_by_id:
-                                                nodes_by_id[r_id] = WorkspacePageNode(
-                                                    id=r_id,
-                                                    title=r_title,
-                                                    url=r_url,
-                                                    parent_type="database_id",
-                                                    parent_id=b_id,
-                                                    last_edited_time=r.get("last_edited_time"),
-                                                )
-                                                nodes_by_title[r_title.lower()] = r_id
-                                except Exception as dbr_err:
-                                    logger.debug("Failed to query rows for child_database %s (%s): %s", child_title, b_id, dbr_err)
-                    node.is_container = has_children
-                except Exception as b_err:
-                    logger.debug("Could not list blocks for node %s: %s", node_id, b_err)
-
-        # 3. Resolve Breadcrumbs for all nodes
-        for node in nodes_by_id.values():
-            crumb_parts = [node.title]
-            curr_parent_id = node.parent_id
-            visited = {node.id}
-            while curr_parent_id and curr_parent_id in nodes_by_id and curr_parent_id not in visited:
-                visited.add(curr_parent_id)
-                parent_node = nodes_by_id[curr_parent_id]
-                crumb_parts.insert(0, parent_node.title)
-                curr_parent_id = parent_node.parent_id
-            node.breadcrumb = " > ".join(crumb_parts)
-
-        # Update cache
         _WORKSPACE_CACHE["timestamp"] = now
         _WORKSPACE_CACHE["nodes_by_id"] = nodes_by_id
         _WORKSPACE_CACHE["nodes_by_title"] = nodes_by_title
@@ -245,7 +217,8 @@ def build_workspace_hierarchy_graph(
 
     except Exception as exc:
         logger.error("Failed to build workspace hierarchy graph: %s", exc)
-        return nodes_by_id
+        return _WORKSPACE_CACHE.get("nodes_by_id", {})
+
 
 
 def _normalize_title_text(text: str) -> str:
@@ -540,33 +513,24 @@ def inspect_page_content(
 
     # 4. Synthesize with Gemini
     if extracted_text.strip():
-        try:
-            client = get_gemini_client()
-            model_name = get_gemini_model()
-            question_prompt = user_question or f"Summarize the key contents, numbers, and takeaways from this page."
-            sys_inst = (
-                "You are an intelligent second-brain assistant answering questions about a user's Notion page.\n"
-                "Explain the key contents accurately based on the extracted text.\n"
-                "Highlight key figures, budget items, bullet points, or project ideas precisely.\n"
-                "Do NOT use LaTeX dollar signs or double asterisks in markdown."
-            )
-            content_prompt = (
-                f"Page Title: {target_node.title}\n"
-                f"Location / Breadcrumb: {breadcrumb}\n"
-                f"User Question: {question_prompt}\n\n"
-                f"Page Extracted Content:\n{extracted_text}"
-            )
-            resp = client.models.generate_content(
-                model=model_name,
-                contents=content_prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=sys_inst,
-                ),
-            )
-            synthesis = resp.text or extracted_text[:500]
-        except Exception as gemini_err:
-            logger.warning("Gemini synthesis of page content failed (%s). Using raw text snippet.", gemini_err)
-            synthesis = "\n".join(block_lines[:15])
+        question_prompt = user_question or "Summarize the key contents, numbers, and takeaways from this page."
+        sys_inst = (
+            "You are an intelligent second-brain assistant answering questions about a user's Notion page.\n"
+            "Explain the key contents accurately based on the extracted text.\n"
+            "Highlight key figures, budget items, bullet points, or project ideas precisely.\n"
+            "Do NOT use LaTeX dollar signs or double asterisks in markdown."
+        )
+        content_prompt = (
+            f"Page Title: {target_node.title}\n"
+            f"Location / Breadcrumb: {breadcrumb}\n"
+            f"User Question: {question_prompt}\n\n"
+            f"Page Extracted Content:\n{extracted_text}"
+        )
+        synthesis = generate_text(
+            prompt=content_prompt,
+            system_instruction=sys_inst,
+            fallback_default="\n".join(block_lines[:15]),
+        )
     else:
         synthesis = "This page is currently empty or contains no readable text blocks."
 
@@ -655,13 +619,8 @@ def archive_page_to_archive_index(
     if inspect_res.extracted_text:
         for line in inspect_res.extracted_text.split("\n")[:30]:
             if line.strip():
-                child_blocks_payload.append({
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": [{"type": "text", "text": {"content": line[:2000]}}]
-                    }
-                })
+                child_blocks_payload.append(_create_paragraph_block(line.strip()))
+
 
     try:
         new_page = notion._request_with_retry(
@@ -814,13 +773,15 @@ def _build_notion_block(content: str, block_type: str = "bulleted_list_item") ->
         }
 
 
-def append_blocks_to_document(
-    target_title_or_id: str,
-    content: str,
+def add_entries_to_workspace_target(
+    target_query: str,
+    items: List[WorkspaceEntryItem],
+    default_status: Optional[str] = None,
     block_type: str = "bulleted_list_item",
     notion_client: Optional[NotionAssistantClient] = None,
+    sender_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Appends new block (bullet point, to-do, paragraph, or callout) directly into an existing Notion document."""
+    """Dynamically adds items/books to a Notion database (e.g. Reading List) or appends blocks to a Page."""
     notion = notion_client or NotionAssistantClient()
 
     if notion.client is None:
@@ -830,54 +791,295 @@ def append_blocks_to_document(
             "reply_text": "❌ Notion integration is not configured or connected.",
         }
 
-    # Resolve document location via workspace hierarchy graph
-    target_node = find_page_node_in_workspace(target_title_or_id, notion_client=notion)
-
-    if not target_node:
-        return {
-            "status": "not_found",
-            "message": f"Document '{target_title_or_id}' not found in workspace hierarchy.",
-            "reply_text": f"❓ Could not locate document **'{target_title_or_id}'** in your Notion workspace graph.",
-        }
-
-    page_id = target_node.id
-    page_title = target_node.title or target_title_or_id
-    page_url = target_node.url or f"https://notion.so/{page_id.replace('-', '')}"
-    breadcrumb = target_node.breadcrumb or page_title
-
-    block_payload = _build_notion_block(content, block_type=block_type)
-
-    try:
-        notion._request_with_retry(
-            notion.client.blocks.children.append,
-            block_id=page_id,
-            children=[block_payload],
-        )
-
-        icon_emoji = "•" if block_type == "bulleted_list_item" else ("☑️" if block_type == "to_do" else "📝")
-        reply = (
-            f"📝 *Appended to Note!*\n\n"
-            f"📌 **[{page_title}]({page_url})**\n"
-            f"📍 Location: *{breadcrumb}*\n\n"
-            f"✨ *Added item:*\n"
-            f"{icon_emoji} {content.strip()}"
-        )
-
-        return {
-            "status": "ok",
-            "page_title": page_title,
-            "page_url": page_url,
-            "breadcrumb": breadcrumb,
-            "block_type": block_type,
-            "content_appended": content.strip(),
-            "reply_text": clean_math_and_markdown(reply),
-        }
-
-    except Exception as exc:
-        logger.error("Failed to append block to page %s (%s): %s", page_title, page_id, exc, exc_info=True)
+    if not items:
         return {
             "status": "error",
-            "message": str(exc),
-            "reply_text": f"❌ Failed to append content to **'{page_title}'**: {exc}",
+            "message": "No items provided to add.",
+            "reply_text": "⚠️ No items were provided to add to your workspace target.",
         }
+
+    # 1. Resolve target node from workspace graph
+    nodes = build_workspace_hierarchy_graph(notion_client=notion)
+    target_node = find_page_node_in_workspace(target_query, notion_client=notion)
+
+    # 2. Check if target is or contains a Database
+    database_id = None
+    target_title = target_query
+    target_url = ""
+    breadcrumb = target_query
+
+    # Direct database search fallback if target_query mentions common databases like Reading List
+    if not target_node or "reading" in target_query.lower() or "book" in target_query.lower():
+        try:
+            db_search = notion._request_with_retry(
+                notion.client.search,
+                query=target_query,
+                filter={"property": "object", "value": "database"},
+                page_size=3,
+            )
+            for db in db_search.get("results", []):
+                db_title = _extract_page_title(db)
+                if db_title and ("reading" in db_title.lower() or target_query.lower() in db_title.lower()):
+                    database_id = db.get("id")
+                    target_title = db_title
+                    target_url = _extract_page_url(db)
+                    breadcrumb = f"Media > {db_title}"
+                    break
+        except Exception as dbe:
+            logger.debug("Database search fallback failed: %s", dbe)
+
+    if target_node:
+        target_title = target_node.title
+        target_url = target_node.url
+        breadcrumb = target_node.breadcrumb or target_node.title
+
+        if not database_id:
+            for child in target_node.children_pages:
+                if child.get("type") == "database":
+                    database_id = child.get("id")
+                    break
+            if not database_id and target_node.parent_type == "database_id":
+                database_id = target_node.id
+
+    # If still no database_id and target_node is None, try generic search fallback
+    if not target_node and not database_id:
+        try:
+            res = notion._request_with_retry(
+                notion.client.search,
+                query=target_query,
+                page_size=5,
+            )
+            for r in res.get("results", []):
+                r_obj = r.get("object")
+                r_title = _extract_page_title(r)
+                if r_obj == "database":
+                    database_id = r.get("id")
+                    target_title = r_title or target_query
+                    target_url = _extract_page_url(r)
+                    breadcrumb = target_title
+                    break
+                elif r_obj == "page" and not target_node:
+                    target_node = WorkspacePageNode(
+                        id=r.get("id"),
+                        title=r_title or target_query,
+                        url=_extract_page_url(r),
+                        breadcrumb=r_title or target_query,
+                    )
+        except Exception as exc:
+            logger.warning("Target search fallback failed: %s", exc)
+
+    if not target_node and not database_id:
+        return {
+            "status": "not_found",
+            "message": f"Target '{target_query}' not found in workspace hierarchy.",
+            "reply_text": f"❓ Could not locate document **'{target_query}'** in your Notion workspace graph.",
+        }
+
+    affected_items = []
+
+    # CASE A: TARGET IS A DATABASE (e.g. Reading List)
+    if database_id:
+        try:
+            db_meta = notion._request_with_retry(
+                notion.client.databases.retrieve,
+                database_id=database_id,
+            )
+            db_props = db_meta.get("properties", {})
+
+            # Identify Title property name
+            title_prop = "Title"
+            for k, v in db_props.items():
+                if v.get("type") == "title":
+                    title_prop = k
+                    break
+
+            # Identify Status property name and valid options
+            status_prop = None
+            valid_statuses = []
+            for k, v in db_props.items():
+                if v.get("type") == "status":
+                    status_prop = k
+                    for opt in v.get("status", {}).get("options", []):
+                        valid_statuses.append(opt.get("name"))
+                    break
+                elif v.get("type") == "select" and "status" in k.lower():
+                    status_prop = k
+                    for opt in v.get("select", {}).get("options", []):
+                        valid_statuses.append(opt.get("name"))
+                    break
+
+            author_prop = next((k for k in db_props if "author" in k.lower()), None)
+            summary_prop = next((k for k in db_props if "summary" in k.lower() or "note" in k.lower() or "detail" in k.lower()), None)
+
+            for item in items:
+                props_payload: Dict[str, Any] = {
+                    title_prop: {
+                        "title": [{"type": "text", "text": {"content": item.title}}]
+                    }
+                }
+
+                if status_prop:
+                    chosen_status = item.status or default_status or "Want to Read"
+                    matched_opt = next((opt for opt in valid_statuses if opt.lower() == chosen_status.lower()), None)
+                    if not matched_opt and valid_statuses:
+                        matched_opt = next((opt for opt in valid_statuses if "want" in opt.lower()), valid_statuses[0])
+                    final_status_val = matched_opt or chosen_status
+                    if db_props[status_prop].get("type") == "status":
+                        props_payload[status_prop] = {"status": {"name": final_status_val}}
+                    else:
+                        props_payload[status_prop] = {"select": {"name": final_status_val}}
+
+                if author_prop and item.author:
+                    props_payload[author_prop] = {
+                        "rich_text": [{"type": "text", "text": {"content": item.author}}]
+                    }
+
+                if summary_prop and item.details:
+                    props_payload[summary_prop] = {
+                        "rich_text": [{"type": "text", "text": {"content": item.details}}]
+                    }
+
+                created_page = notion._request_with_retry(
+                    notion.client.pages.create,
+                    parent={"database_id": database_id},
+                    properties=props_payload,
+                )
+                page_id = created_page.get("id", "")
+                page_url = _extract_page_url(created_page)
+                item_status = None
+                if status_prop and status_prop in props_payload:
+                    val = props_payload[status_prop]
+                    item_status = val.get("status", {}).get("name") or val.get("select", {}).get("name")
+
+                affected_items.append({
+                    "id": page_id,
+                    "title": item.title,
+                    "url": page_url,
+                    "type": "database_row",
+                    "status": item_status,
+                })
+
+            if sender_id:
+                conversation_memory.record_mutation(
+                    sender_id=sender_id,
+                    action_type="WORKSPACE_INGEST",
+                    target_title=target_title,
+                    affected_items=affected_items,
+                    rollback_data={"database_id": database_id, "target_type": "database"},
+                    summary=f"Added {len(affected_items)} item(s) to {target_title}",
+                )
+
+            icon_emoji = "📖" if "reading" in target_title.lower() or "book" in target_title.lower() else "✨"
+            lines = []
+            for it in affected_items:
+                status_str = f" (Status: *{it['status']}*)" if it.get("status") else ""
+                lines.append(f"• {icon_emoji} **[{it['title']}]({it['url']})**{status_str}")
+
+            header_icon = "📚" if "reading" in target_title.lower() or "book" in target_title.lower() else "📂"
+            reply = (
+                f"{header_icon} *Added to {target_title}!*\n\n"
+                + "\n".join(lines)
+                + f"\n\n📍 Location: *{breadcrumb}*"
+            )
+
+            return {
+                "status": "ok",
+                "target_type": "database",
+                "target_title": target_title,
+                "target_url": target_url,
+                "breadcrumb": breadcrumb,
+                "affected_items": affected_items,
+                "reply_text": clean_math_and_markdown(reply),
+            }
+
+        except Exception as exc:
+            logger.error("Failed to add rows to database %s: %s", database_id, exc, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(exc),
+                "reply_text": f"❌ Failed to add entries to **'{target_title}'**: {exc}",
+            }
+
+    # CASE B: TARGET IS A STANDARD DOCUMENT PAGE
+    else:
+        page_id = target_node.id
+        page_title = target_node.title
+        page_url = target_node.url or f"https://notion.so/{page_id.replace('-', '')}"
+        breadcrumb = target_node.breadcrumb or page_title
+
+        blocks_payload = [_build_notion_block(item.title, block_type=block_type) for item in items]
+        try:
+            notion._request_with_retry(
+                notion.client.blocks.children.append,
+                block_id=page_id,
+                children=blocks_payload,
+            )
+
+            for item in items:
+                affected_items.append({
+                    "title": item.title,
+                    "type": "block",
+                })
+
+            if sender_id:
+                conversation_memory.record_mutation(
+                    sender_id=sender_id,
+                    action_type="WORKSPACE_INGEST",
+                    target_title=page_title,
+                    affected_items=affected_items,
+                    rollback_data={"page_id": page_id, "target_type": "page"},
+                    summary=f"Appended {len(items)} block(s) to {page_title}",
+                )
+
+            icon_emoji = "•" if block_type == "bulleted_list_item" else ("☑️" if block_type == "to_do" else "📝")
+            item_lines = [f"{icon_emoji} {it['title']}" for it in affected_items]
+            reply = (
+                f"📝 *Appended to Note!*\n\n"
+                f"📌 **[{page_title}]({page_url})**\n"
+                f"📍 Location: *{breadcrumb}*\n\n"
+                f"✨ *Added item(s):*\n"
+                + "\n".join(item_lines)
+            )
+
+            return {
+                "status": "ok",
+                "target_type": "page",
+                "target_title": page_title,
+                "target_url": page_url,
+                "breadcrumb": breadcrumb,
+                "affected_items": affected_items,
+                "reply_text": clean_math_and_markdown(reply),
+            }
+        except Exception as exc:
+            logger.error("Failed to append blocks to page %s: %s", page_title, exc, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(exc),
+                "reply_text": f"❌ Failed to append content to **'{page_title}'**: {exc}",
+            }
+
+
+def append_blocks_to_document(
+    target_title_or_id: str,
+    content: str,
+    block_type: str = "bulleted_list_item",
+    notion_client: Optional[NotionAssistantClient] = None,
+    sender_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Appends new block (or adds database rows) directly into an existing Notion document or database."""
+    lines = [line.strip().lstrip("1234567890.-•* ").strip() for line in content.split("\n") if line.strip()]
+    items = [WorkspaceEntryItem(title=l) for l in lines] if lines else [WorkspaceEntryItem(title=content.strip())]
+    res = add_entries_to_workspace_target(
+        target_query=target_title_or_id,
+        items=items,
+        block_type=block_type,
+        notion_client=notion_client,
+        sender_id=sender_id,
+    )
+    if res.get("status") == "ok":
+        res["page_title"] = res.get("target_title", target_title_or_id)
+        res["page_url"] = res.get("target_url", "")
+        res["content_appended"] = content.strip()
+        res["block_type"] = block_type
+    return res
 

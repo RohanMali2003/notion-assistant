@@ -6,35 +6,19 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-try:
-    from google import genai
-    from google.genai import types
-except ImportError:
-    genai = None
-    types = None
-
+from app.ai import DEFAULT_GEMINI_MODEL, generate_structured, get_gemini_client, get_gemini_model
 from app.notion_client import NotionAssistantClient, clean_math_and_markdown
+from app.notion_utils import (
+    extract_page_title as _extract_page_title,
+    extract_page_url as _extract_page_url,
+)
+from app.notifier import send_notification
 from app.schemas import WeeklyVelocityReport
 from app.telegram_client import TelegramAssistantClient
 from app.whatsapp_client import WhatsAppAssistantClient
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
-
-
-def get_gemini_client():
-    """Create and return a google-genai Client instance with 30s timeout."""
-    if genai is None:
-        raise RuntimeError("google-genai library is not installed or available")
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    try:
-        if types and hasattr(types, "HttpOptions"):
-            http_opts = types.HttpOptions(timeout=30.0)
-            return genai.Client(api_key=api_key, http_options=http_opts) if api_key else genai.Client(http_options=http_opts)
-    except Exception:
-        pass
-    return genai.Client(api_key=api_key) if api_key else genai.Client()
 
 
 WEEKLY_DIGEST_SYSTEM_INSTRUCTION = (
@@ -55,25 +39,6 @@ WEEKLY_DIGEST_SYSTEM_INSTRUCTION = (
     "   - DO NOT use double asterisks (**). Use clean standard markdown formatting.\n"
 )
 
-
-def _extract_page_title(page: Dict[str, Any]) -> str:
-    """Extract plain text title from a Notion page."""
-    props = page.get("properties", {})
-    for _, prop_val in props.items():
-        if isinstance(prop_val, dict) and prop_val.get("type") == "title":
-            title_list = prop_val.get("title", [])
-            if title_list:
-                return "".join(t.get("plain_text", "") for t in title_list).strip()
-    return "Untitled Page"
-
-
-def _extract_page_url(page: Dict[str, Any]) -> str:
-    """Extract clean Notion URL from page dictionary."""
-    url = page.get("url", "")
-    if not url and page.get("id"):
-        clean_id = page["id"].replace("-", "")
-        return f"https://www.notion.so/{clean_id}"
-    return url
 
 
 def _is_system_generated_page(title: str, tags: List[str]) -> bool:
@@ -263,42 +228,33 @@ def synthesize_velocity_digest(
         "Please provide your structured Weekly Velocity Report."
     )
 
-    try:
-        response = client.models.generate_content(
-            model=os.getenv("GEMINI_DIGEST_MODEL", os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)),
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=WEEKLY_DIGEST_SYSTEM_INSTRUCTION,
-                response_mime_type="application/json",
-                response_schema=WeeklyVelocityReport,
-                temperature=0.3,
-            ),
-        )
-        if response.parsed:
-            if isinstance(response.parsed, WeeklyVelocityReport):
-                report = response.parsed
-            else:
-                report = WeeklyVelocityReport.model_validate(response.parsed)
-        elif response.text:
-            report = WeeklyVelocityReport.model_validate_json(response.text)
-        else:
-            raise ValueError("Empty response from Gemini Weekly Velocity synthesizer")
-    except Exception as exc:
-        logger.error("Gemini Weekly Velocity synthesis failed (%s). Using algorithmic fallback.", exc)
-        total_comp = len(completed_list)
-        total_pend = len(in_progress_list) + len(overdue_list)
-        score = min(100, max(40, int((total_comp / max(1, total_comp + total_pend)) * 100)))
-        report = WeeklyVelocityReport(
-            velocity_score=score,
-            verdict="Steady Execution" if score >= 70 else "Rebalancing Needed",
-            headline=f"Completed {total_comp} tasks and maintained active study subjects.",
-            tasks_completed_count=total_comp,
-            tasks_pending_count=total_pend,
-            completed_highlights=completed_list[:5],
-            learning_progress=subjects_list[:4],
-            bottlenecks=overdue_list[:3],
-            next_week_priorities=["Advance core research subjects", "Clear pending high-priority tasks"],
-        )
+    total_comp = len(completed_list)
+    total_pend = len(in_progress_list) + len(overdue_list)
+    score = min(100, max(40, int((total_comp / max(1, total_comp + total_pend)) * 100)))
+    fallback_report = WeeklyVelocityReport(
+        velocity_score=score,
+        verdict="Steady Execution" if score >= 70 else "Rebalancing Needed",
+        headline=f"Completed {total_comp} tasks and maintained active study subjects.",
+        tasks_completed_count=total_comp,
+        tasks_pending_count=total_pend,
+        completed_highlights=completed_list[:5],
+        learning_progress=subjects_list[:4],
+        bottlenecks=overdue_list[:3],
+        next_week_priorities=["Advance core research subjects", "Clear pending high-priority tasks"],
+    )
+
+    client = get_gemini_client()
+    model_target = os.getenv("GEMINI_DIGEST_MODEL", os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL))
+    report = generate_structured(
+        prompt=prompt,
+        schema=WeeklyVelocityReport,
+        system_instruction=WEEKLY_DIGEST_SYSTEM_INSTRUCTION,
+        fallback_default=fallback_report,
+        model=model_target,
+        client=client,
+    )
+
+
 
     report.tasks_completed_count = len(completed_list)
     report.tasks_pending_count = len(in_progress_list) + len(overdue_list)
@@ -523,21 +479,16 @@ def execute_weekly_digest_pipeline(
     if page_url:
         delivery_text += f"\n\n🔗 *Notion Weekly Review:* {page_url}"
 
-    # 4. Deliver to WhatsApp
-    if to_phone:
-        try:
-            whatsapp.send_message(to=to_phone, text=delivery_text, preview_url=bool(page_url))
-            logger.info("Sent WhatsApp Weekly Digest to %s", to_phone)
-        except Exception as wa_err:
-            logger.error("Failed to send WhatsApp Weekly Digest: %s", wa_err)
+    # 4. Deliver multichannel notifications
+    send_notification(
+        delivery_text,
+        to_phone=to_phone,
+        chat_id=chat_id,
+        preview_url=bool(page_url),
+        whatsapp_client=whatsapp,
+        telegram_client=telegram,
+    )
 
-    # 5. Deliver to Telegram
-    if chat_id:
-        try:
-            telegram.send_message(text=delivery_text, chat_id=str(chat_id))
-            logger.info("Sent Telegram Weekly Digest to %s", chat_id)
-        except Exception as tg_err:
-            logger.error("Failed to send Telegram Weekly Digest: %s", tg_err)
 
     return {
         "status": "ok",

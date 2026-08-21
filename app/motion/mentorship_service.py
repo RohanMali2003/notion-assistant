@@ -11,13 +11,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-try:
-    from google import genai
-    from google.genai import types
-except ImportError:
-    genai = None
-    types = None
-
+from app.ai import DEFAULT_GEMINI_MODEL, generate_text, get_gemini_client, get_gemini_model
 from app.motion.permissions import (
     MotionPermission,
     PermissionEngine,
@@ -43,18 +37,6 @@ from app.motion.strategic_model import StrategicModelService, strategic_model_se
 logger = logging.getLogger("notion-assistant.motion.mentorship")
 
 
-def get_gemini_client():
-    """Create and return a google-genai Client instance."""
-    if genai is None:
-        raise RuntimeError("google-genai library is not installed or available")
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    try:
-        if types and hasattr(types, "HttpOptions"):
-            http_opts = types.HttpOptions(timeout=30.0)
-            return genai.Client(api_key=api_key, http_options=http_opts) if api_key else genai.Client(http_options=http_opts)
-    except Exception:
-        pass
-    return genai.Client(api_key=api_key) if api_key else genai.Client()
 
 
 MOTION_SYSTEM_INSTRUCTION = (
@@ -114,16 +96,21 @@ class MotionMentorshipService:
         )
 
         try:
-            client = get_gemini_client()
             model_name = os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
-            response = client.models.generate_content(
+            analysis_text = generate_text(
+                prompt=prompt,
+                system_instruction=MOTION_SYSTEM_INSTRUCTION,
                 model=model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=MOTION_SYSTEM_INSTRUCTION,
-                ),
+                fallback_default="",
             )
-            analysis_text = response.text or "Unable to generate strategic evaluation at this time."
+            if not analysis_text:
+                # Direct client call fallback if generate_text was empty
+                client = get_gemini_client()
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                )
+                analysis_text = response.text or "Unable to generate strategic evaluation at this time."
         except Exception as exc:
             logger.error("Error during Motion LLM consultation: %s", exc)
             analysis_text = (
@@ -133,6 +120,7 @@ class MotionMentorshipService:
                 f"**Strategic Risk:** {context.trajectory.biggest_risk}\n\n"
                 f"*(Encountered temporary processing bottleneck: {exc})*"
             )
+
 
         # 3. Extract recommendations and log to Decision Journal if applicable
         recommendations: List[MotionRecommendation] = []

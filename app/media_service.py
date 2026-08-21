@@ -6,29 +6,15 @@ import re
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
 
-try:
-    from google import genai
-    from google.genai import types
-except ImportError:
-    genai = None
-    types = None
-
+from app.ai import DEFAULT_GEMINI_MODEL, get_gemini_client, get_gemini_model, get_genai_types
 from app.notion_client import NotionAssistantClient
+from app.notifier import send_notification
 from app.tag_directory import CANONICAL_TAG_NAMES, match_closest_tag
 from app.telegram_client import TelegramAssistantClient
 from app.whatsapp_client import WhatsAppAssistantClient
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
-
-
-def get_gemini_client():
-    """Create and return a google-genai Client instance."""
-    if genai is None:
-        raise RuntimeError("google-genai library is not installed or available")
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    return genai.Client(api_key=api_key) if api_key else genai.Client()
 
 
 VISION_ANALYSIS_SYSTEM_INSTRUCTION = (
@@ -57,27 +43,35 @@ def analyze_image_with_gemini(
 ) -> Dict[str, Any]:
     """Analyze image using Gemini Multimodal Vision API."""
     client = get_gemini_client()
+    gen_types = get_genai_types()
 
     prompt_text = (
         f"User Caption / Note: {caption or 'None'}\n\n"
         "Please analyze this image, transcribe all text and diagrams, and provide your structured synthesis."
     )
 
-    image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+    contents: List[Any] = [prompt_text]
+    if gen_types is not None and hasattr(gen_types, "Part"):
+        image_part = gen_types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+        contents = [image_part, prompt_text]
 
     try:
-        response = client.models.generate_content(
-            model=os.getenv("GEMINI_VISION_MODEL", os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)),
-            contents=[image_part, prompt_text],
-            config=types.GenerateContentConfig(
+        config = None
+        if gen_types is not None:
+            config = gen_types.GenerateContentConfig(
                 system_instruction=VISION_ANALYSIS_SYSTEM_INSTRUCTION,
                 temperature=0.2,
-            ),
+            )
+        response = client.models.generate_content(
+            model=os.getenv("GEMINI_VISION_MODEL", os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)),
+            contents=contents,
+            config=config,
         )
         resp_text = response.text or ""
     except Exception as exc:
         logger.error("Gemini Vision analysis failed (%s)", exc)
         resp_text = ""
+
 
     # Parse response fields
     title = caption[:50] if caption else "Visual Note"
@@ -200,19 +194,15 @@ def execute_media_pipeline(
     reply_text = "\n".join(msg_lines).strip()
 
     # Send confirmation
-    if to_phone:
-        try:
-            whatsapp.send_message(to=to_phone, text=reply_text, preview_url=bool(notion_url))
-            logger.info("Sent WhatsApp visual analysis to %s", to_phone)
-        except Exception as wa_err:
-            logger.error("Failed to send WhatsApp message: %s", wa_err)
+    send_notification(
+        reply_text,
+        to_phone=to_phone,
+        chat_id=chat_id,
+        preview_url=bool(notion_url),
+        whatsapp_client=whatsapp,
+        telegram_client=telegram,
+    )
 
-    if chat_id:
-        try:
-            telegram.send_message(text=reply_text, chat_id=str(chat_id))
-            logger.info("Sent Telegram visual analysis to %s", chat_id)
-        except Exception as tg_err:
-            logger.error("Failed to send Telegram message: %s", tg_err)
 
     return {
         "status": "ok",

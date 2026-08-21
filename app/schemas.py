@@ -18,6 +18,7 @@ class ModuleEnum(str, Enum):
     SEARCH = "SEARCH"
     DIGEST = "DIGEST"
     MOTION = "MOTION"
+    ROLLBACK = "ROLLBACK"
 
 
 class ModuleClassification(BaseModel):
@@ -34,9 +35,10 @@ class ModuleClassification(BaseModel):
         "SEARCH",
         "DIGEST",
         "MOTION",
+        "ROLLBACK",
     ] = Field(
         ...,
-        description="The target module: TASKS, TASK_ACTION, BATCH_TASK_ACTION, DOCUMENT_APPEND, MEMORY_CONTROL, MIND, LEARNING, LEETCODE, SEARCH, DIGEST, or MOTION."
+        description="The target module: TASKS, TASK_ACTION, BATCH_TASK_ACTION, DOCUMENT_APPEND, MEMORY_CONTROL, MIND, LEARNING, LEETCODE, SEARCH, DIGEST, MOTION, or ROLLBACK."
     )
     raw_text: str = Field(
         default="",
@@ -404,19 +406,77 @@ class TaskActionAnalysis(BaseModel):
     )
 
 
-class DocumentAppendAnalysis(BaseModel):
-    """Structured output schema for DOCUMENT_APPEND module (inserting blocks/bullets into existing notes)."""
+class WorkspaceEntryItem(BaseModel):
+    """Single item entry to be added into a document or database."""
+    title: str = Field(..., description="Title or core text of the item/book/note.")
+    author: Optional[str] = Field(default=None, description="Author name if book/paper/article.")
+    details: Optional[str] = Field(default=None, description="Additional notes, summary, or details.")
+    status: Optional[str] = Field(default=None, description="Status (e.g. 'Want to Read', 'Reading', 'Read', 'To Do').")
+
+
+class WorkspaceIngestAnalysis(BaseModel):
+    """Structured output schema for DOCUMENT_APPEND and dynamic workspace ingestion (pages and databases like Reading List)."""
+    target_name: str = Field(
+        default="",
+        description="Title of target Notion document or database (e.g. 'Reading List', 'Ideas for projects', 'Year 1 Budget', 'Notes')."
+    )
     target_document_title: str = Field(
-        ...,
-        description="Title of the target Notion document or container page (e.g. 'Ideas for projects', 'Year 1 Budget', 'Finances')."
+        default="",
+        description="Alias for target_name for backward compatibility."
+    )
+    items: List[WorkspaceEntryItem] = Field(
+        default_factory=list,
+        description="List of items/books/bullets to add."
     )
     content_to_append: str = Field(
-        ...,
-        description="Text content, bullet point, idea, or to-do item to append into the document."
+        default="",
+        description="Text content, bullet point, idea, or item text to append if single item."
     )
     block_type: Literal["bulleted_list_item", "to_do", "paragraph", "callout"] = Field(
         default="bulleted_list_item",
-        description="Type of block to append: bulleted_list_item, to_do, paragraph, or callout."
+        description="Type of block to append if target is a standard page: bulleted_list_item, to_do, paragraph, or callout."
+    )
+    default_status: Optional[str] = Field(
+        default=None,
+        description="Default status if target is a database with a Status property (e.g. 'Want to Read')."
+    )
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.target_name and self.target_document_title:
+            self.target_name = self.target_document_title
+        elif not self.target_document_title and self.target_name:
+            self.target_document_title = self.target_name
+        if not self.items and self.content_to_append:
+            self.items = [WorkspaceEntryItem(title=self.content_to_append, status=self.default_status)]
+        elif self.items and not self.content_to_append:
+            self.content_to_append = "\n".join(i.title for i in self.items)
+
+
+# Alias for backward compatibility
+DocumentAppendAnalysis = WorkspaceIngestAnalysis
+
+
+class RollbackAnalysis(BaseModel):
+    """Structured output schema for ROLLBACK module (undoing previous actions, deleting mistaken items, and compound correction)."""
+    command: Literal["ROLLBACK_LAST", "ROLLBACK_SPECIFIC", "CORRECTION_AND_REROUTE"] = Field(
+        default="ROLLBACK_LAST",
+        description="Type of rollback: ROLLBACK_LAST (undo last action), ROLLBACK_SPECIFIC (undo specific named action), or CORRECTION_AND_REROUTE (undo last mistake and route remainder to new target)."
+    )
+    target_mutation_id: Optional[str] = Field(
+        default=None,
+        description="Specific mutation ID or target description if targeting a specific action."
+    )
+    correction_instruction: Optional[str] = Field(
+        default=None,
+        description="The follow-up correction command (e.g. 'put it in reading list')."
+    )
+    new_target_title: Optional[str] = Field(
+        default=None,
+        description="The target document or database to route into if corrective (e.g. 'Reading List', 'Notes')."
+    )
+    extracted_items: List[str] = Field(
+        default_factory=list,
+        description="List of item titles/content extracted from context or message to reroute (e.g. ['The Pragmatic Programmer', 'A Philosophy of Software Design'])."
     )
 
 

@@ -11,9 +11,55 @@ except ImportError:
     Client = None
     APIResponseError = None
 
+from app.notion_utils import (
+    build_notion_block,
+    chunk_text,
+    create_bullet_block,
+    create_callout_block,
+    create_code_block,
+    create_divider_block,
+    create_heading_block,
+    create_numbered_block,
+    create_paragraph_block,
+    create_quote_block,
+    create_rich_text,
+    create_todo_block,
+    extract_page_due_date,
+    extract_page_priority,
+    extract_page_status,
+    extract_page_tags,
+    extract_page_title,
+    extract_page_url,
+    format_date_property,
+    format_multi_select_property,
+    format_relation_property,
+    format_rich_text_property,
+    format_select_property,
+    format_title_property,
+    format_url_property,
+)
 from app.schemas import LEARNING_TAG, ReminderItem
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_config_val(explicit: Optional[str], setting_key: Optional[str], *env_vars: str, default: str = "") -> str:
+    """Resolve configuration value across explicit args, settings object, and environment variables."""
+    if explicit is not None:
+        return explicit
+    try:
+        from app.config import settings
+        if setting_key and hasattr(settings, setting_key):
+            val = getattr(settings, setting_key)
+            if val:
+                return str(val)
+    except Exception:
+        pass
+    for env_name in env_vars:
+        val = os.getenv(env_name)
+        if val:
+            return val
+    return default
 
 
 class NotionValidationError(ValueError):
@@ -72,65 +118,29 @@ class NotionAssistantClient:
         resources_db_id: Optional[str] = None,
         leetcode_log_db_id: Optional[str] = None,
     ):
-        try:
-            from app.config import settings
-        except Exception:
-            settings = None
-
-        self.token = (
-            token
-            or (getattr(settings, "NOTION_TOKEN", None) if settings else None)
-            or os.getenv("NOTION_TOKEN")
-            or os.getenv("NOTION_API_KEY")
+        self.token = _resolve_config_val(token, "NOTION_TOKEN", "NOTION_TOKEN", "NOTION_API_KEY")
+        
+        # Primary tasks database ID resolution
+        tasks_id = _resolve_config_val(
+            tasks_db_id if tasks_db_id is not None else database_id,
+            "NOTION_TASKS_DB_ID",
+            "NOTION_TASKS_DB_ID",
+            "NOTION_DATABASE_ID",
         )
-        if tasks_db_id is not None:
-            tasks_id = tasks_db_id
-        elif database_id is not None:
-            tasks_id = database_id
-        else:
-            tasks_id = (
-                (getattr(settings, "NOTION_TASKS_DB_ID", None) if settings else None)
-                or os.getenv("NOTION_TASKS_DB_ID")
-                or (getattr(settings, "NOTION_DATABASE_ID", None) if settings else None)
-                or os.getenv("NOTION_DATABASE_ID")
-            )
-
         self.database_id = tasks_id
         self.tasks_db_id = tasks_id
 
-        if substack_db_id is not None:
-            self.substack_db_id = substack_db_id
-        else:
-            self.substack_db_id = getattr(settings, "NOTION_SUBSTACK_ID", None) or os.getenv("NOTION_SUBSTACK_ID", "")
-
-        if ramblings_db_id is not None:
-            self.ramblings_db_id = ramblings_db_id
-        else:
-            self.ramblings_db_id = getattr(settings, "NOTION_RAMBLINGS_ID", None) or os.getenv("NOTION_RAMBLINGS_ID", "")
-
-        if daily_logs_db_id is not None:
-            self.daily_logs_db_id = daily_logs_db_id
-        else:
-            self.daily_logs_db_id = getattr(settings, "NOTION_DAILY_LOGS_ID", None) or os.getenv("NOTION_DAILY_LOGS_ID", "")
-
-        if subjects_db_id is not None:
-            self.subjects_db_id = subjects_db_id
-        else:
-            self.subjects_db_id = getattr(settings, "NOTION_SUBJECTS_DB_ID", None) or os.getenv("NOTION_SUBJECTS_DB_ID", "")
-
-        if resources_db_id is not None:
-            self.resources_db_id = resources_db_id
-        else:
-            self.resources_db_id = getattr(settings, "NOTION_RESOURCES_DB_ID", None) or os.getenv("NOTION_RESOURCES_DB_ID", "")
-
-        if leetcode_log_db_id is not None:
-            self.leetcode_log_db_id = leetcode_log_db_id
-        else:
-            self.leetcode_log_db_id = (
-                getattr(settings, "NOTION_LEETCODE_LOG_DB_ID", None)
-                or os.getenv("NOTION_LEETCODE_LOG_DB_ID")
-                or os.getenv("NOTION_LEETCODE_DB_ID", "")
-            )
+        self.substack_db_id = _resolve_config_val(substack_db_id, "NOTION_SUBSTACK_ID", "NOTION_SUBSTACK_ID")
+        self.ramblings_db_id = _resolve_config_val(ramblings_db_id, "NOTION_RAMBLINGS_ID", "NOTION_RAMBLINGS_ID")
+        self.daily_logs_db_id = _resolve_config_val(daily_logs_db_id, "NOTION_DAILY_LOGS_ID", "NOTION_DAILY_LOGS_ID")
+        self.subjects_db_id = _resolve_config_val(subjects_db_id, "NOTION_SUBJECTS_DB_ID", "NOTION_SUBJECTS_DB_ID")
+        self.resources_db_id = _resolve_config_val(resources_db_id, "NOTION_RESOURCES_DB_ID", "NOTION_RESOURCES_DB_ID")
+        self.leetcode_log_db_id = _resolve_config_val(
+            leetcode_log_db_id,
+            "NOTION_LEETCODE_LOG_DB_ID",
+            "NOTION_LEETCODE_LOG_DB_ID",
+            "NOTION_LEETCODE_DB_ID",
+        )
 
         self._db_props_cache: Dict[str, Dict[str, str]] = {}
 
@@ -138,6 +148,7 @@ class NotionAssistantClient:
             self.client = Client(auth=self.token, notion_version="2022-06-28")
         else:
             self.client = None
+
 
     def _extract_offending_property(self, exc: Exception) -> Optional[str]:
         raw_msgs = []
@@ -474,61 +485,21 @@ class NotionAssistantClient:
         )
 
     def _parse_page_to_dict(self, page: Dict[str, Any]) -> TaskDict:
-        props = page.get("properties", {})
+        from app.notion_utils import (
+            extract_page_due_date,
+            extract_page_priority,
+            extract_page_tags,
+            extract_page_title,
+            extract_page_url,
+        )
 
-        title = "Untitled"
-        for title_key in ("Name", "Title", "name", "title"):
-            if title_key in props:
-                title_list = props[title_key].get("title", [])
-                if title_list:
-                    title = "".join([t.get("plain_text", "") for t in title_list])
-                    break
-        if title == "Untitled":
-            for val in props.values():
-                if isinstance(val, dict) and val.get("type") == "title":
-                    title_list = val.get("title", [])
-                    if title_list:
-                        title = "".join([t.get("plain_text", "") for t in title_list])
-                        break
-
-        due_date = None
-        for date_key in ("Due date", "Due Date", "Due", "due_date"):
-            if date_key in props and isinstance(props[date_key], dict):
-                date_obj = props[date_key].get("date")
-                if date_obj and isinstance(date_obj, dict):
-                    due_date = date_obj.get("start")
-                    break
-        if due_date is None:
-            for val in props.values():
-                if isinstance(val, dict) and val.get("type") == "date":
-                    date_obj = val.get("date")
-                    if date_obj and isinstance(date_obj, dict):
-                        due_date = date_obj.get("start")
-                        break
-
-        priority = None
-        priority_prop = props.get("Priority") or props.get("priority")
-        if priority_prop and isinstance(priority_prop, dict):
-            select_obj = priority_prop.get("select")
-            if select_obj and isinstance(select_obj, dict):
-                priority = select_obj.get("name")
-
-        tag = None
-        tag_prop = props.get("Tag") or props.get("tag")
-        if tag_prop and isinstance(tag_prop, dict):
-            select_obj = tag_prop.get("select")
-            if select_obj and isinstance(select_obj, dict):
-                tag = select_obj.get("name")
-            elif "multi_select" in tag_prop:
-                ms = tag_prop.get("multi_select", [])
-                if ms and isinstance(ms, list):
-                    tag = ms[0].get("name")
-
+        title = extract_page_title(page, default="Untitled")
+        due_date = extract_page_due_date(page)
+        priority = extract_page_priority(page)
+        tags = extract_page_tags(page)
+        tag = tags[0] if tags else None
         page_id = page.get("id")
-        page_url = page.get("url")
-        if not page_url and page_id:
-            clean_id = page_id.replace("-", "")
-            page_url = f"https://www.notion.so/{clean_id}"
+        page_url = extract_page_url(page)
 
         return TaskDict(
             title=title,
@@ -538,6 +509,7 @@ class NotionAssistantClient:
             page_id=page_id,
             url=page_url,
         )
+
 
     def _query_database(self, **kwargs) -> Dict[str, Any]:
         """Queries database using databases.query or client.request depending on notion-client version."""
