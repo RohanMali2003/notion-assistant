@@ -409,16 +409,26 @@ def execute_batch_task_action(
             "reply_text": "❌ Notion integration is not configured or connected.",
         }
 
-    # Query matching tasks
+    # Query matching tasks — use high limit to ensure all tasks are fetched
     pending_tasks = notion.get_pending(
-        limit=50,
+        limit=200,
         priority=batch_analysis.priority_filter,
         tag=batch_analysis.tag_filter,
     )
 
-    query = (batch_analysis.target_query or "").strip().lower()
-    if query:
-        pending_tasks = [t for t in pending_tasks if query in t.get("title", "").lower()]
+    raw_query = (batch_analysis.target_query or "").strip()
+    if raw_query:
+        # Normalize: match both '&' and 'and' variants so LLM phrasing doesn't matter
+        query_lower = raw_query.lower()
+        query_amp = query_lower.replace(" and ", " & ")   # "read and annotate" -> "read & annotate"
+        query_and = query_lower.replace(" & ", " and ")   # "read & annotate" -> "read and annotate"
+        pending_tasks = [
+            t for t in pending_tasks
+            if any(
+                variant in t.get("title", "").lower()
+                for variant in (query_lower, query_amp, query_and)
+            )
+        ]
 
     if not pending_tasks:
         return {
@@ -501,9 +511,18 @@ def execute_batch_set_priority(
     if notion.client is None:
         return {"status": "error", "reply_text": "❌ Notion not connected.", "count": 0}
 
-    pending = notion.get_pending(limit=100)
-    query_lower = target_query.strip().lower()
-    matched = [t for t in pending if query_lower in t.get("title", "").lower()] if query_lower else pending
+    pending = notion.get_pending(limit=200)
+    raw_q = target_query.strip()
+    if raw_q:
+        q_lower = raw_q.lower()
+        q_amp = q_lower.replace(" and ", " & ")
+        q_and = q_lower.replace(" & ", " and ")
+        matched = [
+            t for t in pending
+            if any(v in t.get("title", "").lower() for v in (q_lower, q_amp, q_and))
+        ]
+    else:
+        matched = pending
 
     if not matched:
         return {
