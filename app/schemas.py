@@ -8,18 +8,35 @@ from pydantic import BaseModel, Field
 class ModuleEnum(str, Enum):
     """Supported module categories for Stage 1 classification."""
     TASKS = "TASKS"
+    TASK_ACTION = "TASK_ACTION"
+    BATCH_TASK_ACTION = "BATCH_TASK_ACTION"
+    DOCUMENT_APPEND = "DOCUMENT_APPEND"
+    MEMORY_CONTROL = "MEMORY_CONTROL"
     MIND = "MIND"
     LEARNING = "LEARNING"
     LEETCODE = "LEETCODE"
     SEARCH = "SEARCH"
     DIGEST = "DIGEST"
+    MOTION = "MOTION"
 
 
 class ModuleClassification(BaseModel):
     """Stage 1: Lightweight classification schema deciding target module."""
-    module: Literal["TASKS", "MIND", "LEARNING", "LEETCODE", "SEARCH", "DIGEST"] = Field(
+    module: Literal[
+        "TASKS",
+        "TASK_ACTION",
+        "BATCH_TASK_ACTION",
+        "DOCUMENT_APPEND",
+        "MEMORY_CONTROL",
+        "MIND",
+        "LEARNING",
+        "LEETCODE",
+        "SEARCH",
+        "DIGEST",
+        "MOTION",
+    ] = Field(
         ...,
-        description="The target module: TASKS, MIND, LEARNING, LEETCODE, SEARCH, or DIGEST."
+        description="The target module: TASKS, TASK_ACTION, BATCH_TASK_ACTION, DOCUMENT_APPEND, MEMORY_CONTROL, MIND, LEARNING, LEETCODE, SEARCH, DIGEST, or MOTION."
     )
     raw_text: str = Field(
         default="",
@@ -347,6 +364,108 @@ class PageInspectResult(BaseModel):
     extracted_text: str = ""
     synthesis: str = ""
     reply_text: str = ""
+
+
+# --- Ocean v3.0: Task Action & Document Append Schemas ---
+
+class TaskActionType(str, Enum):
+    """Supported task modification actions."""
+    MARK_DONE = "MARK_DONE"
+    MARK_IN_PROGRESS = "MARK_IN_PROGRESS"
+    UPDATE_DUE_DATE = "UPDATE_DUE_DATE"
+    DELETE_TASK = "DELETE_TASK"
+
+
+class TaskActionAnalysis(BaseModel):
+    """Structured output schema for TASK_ACTION module (updating, rescheduling, completing, archiving tasks)."""
+    action: Literal["MARK_DONE", "MARK_IN_PROGRESS", "UPDATE_DUE_DATE", "DELETE_TASK"] = Field(
+        ...,
+        description="The action type to perform on the task."
+    )
+    task_target_title: str = Field(
+        default="",
+        description="Target task title or keyword to match against active tasks."
+    )
+    new_due_date_iso: Optional[str] = Field(
+        default=None,
+        description="New due date resolved in YYYY-MM-DD format (if action is UPDATE_DUE_DATE)."
+    )
+    new_status_name: Optional[Literal["Done", "In progress", "Not started"]] = Field(
+        default=None,
+        description="New status name to set."
+    )
+    ordinal_index: Optional[int] = Field(
+        default=None,
+        description="1-based ordinal index if user referenced a task by position from recent query (e.g., 1 for 'first task', 2 for 'second')."
+    )
+    confidence: float = Field(
+        default=1.0,
+        description="Confidence level of intent parsing."
+    )
+
+
+class DocumentAppendAnalysis(BaseModel):
+    """Structured output schema for DOCUMENT_APPEND module (inserting blocks/bullets into existing notes)."""
+    target_document_title: str = Field(
+        ...,
+        description="Title of the target Notion document or container page (e.g. 'Ideas for projects', 'Year 1 Budget', 'Finances')."
+    )
+    content_to_append: str = Field(
+        ...,
+        description="Text content, bullet point, idea, or to-do item to append into the document."
+    )
+    block_type: Literal["bulleted_list_item", "to_do", "paragraph", "callout"] = Field(
+        default="bulleted_list_item",
+        description="Type of block to append: bulleted_list_item, to_do, paragraph, or callout."
+    )
+
+
+# --- Ocean v3.1: Memory Governance & Batch Action Schemas ---
+
+class MemoryGovernanceAnalysis(BaseModel):
+    """Structured output schema for MEMORY_CONTROL module (forget, update memory, inspect memory)."""
+    command: Literal["FORGET", "UPDATE_STATUS", "INSPECT_MEMORY"] = Field(
+        ...,
+        description="Memory governance action: FORGET (soft-delete entity), UPDATE_STATUS (supersede old status), INSPECT_MEMORY (view active nodes)."
+    )
+    target_entity: str = Field(
+        default="",
+        description="Target entity name or keyword to forget, update, or inspect."
+    )
+    new_state_summary: Optional[str] = Field(
+        default=None,
+        description="Updated thesis or status summary if updating memory state."
+    )
+
+
+class BatchTaskActionAnalysis(BaseModel):
+    """Structured output schema for BATCH_TASK_ACTION module (multi-task actions across tags, priorities, or queries)."""
+    action: Literal["MARK_DONE", "MARK_IN_PROGRESS", "UPDATE_DUE_DATE", "DELETE_TASK"] = Field(
+        ...,
+        description="The action type to perform across matching tasks."
+    )
+    tag_filter: Optional[str] = Field(
+        default=None,
+        description="Optional tag filter (e.g. 'UMass Admin', 'Leetcode', 'Finances')."
+    )
+    priority_filter: Optional[Literal["High", "Medium", "Low"]] = Field(
+        default=None,
+        description="Optional priority filter (High/Medium/Low)."
+    )
+    target_query: Optional[str] = Field(
+        default=None,
+        description="Optional title substring query matching multiple tasks."
+    )
+    new_due_date_iso: Optional[str] = Field(
+        default=None,
+        description="New due date resolved in YYYY-MM-DD format if action is UPDATE_DUE_DATE."
+    )
+    new_status_name: Optional[Literal["Done", "In progress", "Not started"]] = Field(
+        default=None,
+        description="New status name to set."
+    )
+
+
 
 
 

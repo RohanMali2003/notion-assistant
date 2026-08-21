@@ -1,7 +1,7 @@
 import logging
 import os
-from typing import Any, Dict, Optional, Tuple, Union
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Request
+from typing import Any, Dict, List, Optional, Tuple, Union
+from fastapi import BackgroundTasks, Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 from starlette.concurrency import run_in_threadpool
 try:
@@ -12,24 +12,31 @@ except ImportError:
     types = None
 
 from app.config import settings
+from app.graph_memory_service import graph_memory
 from app.learning_service import execute_learning_background_pipeline
 from app.leetcode_service import execute_leetcode_background_pipeline
 from app.media_service import execute_media_pipeline
 from app.memory import conversation_memory
 from app.notion_client import NotionAssistantClient
 from app.search_service import execute_second_brain_search_pipeline
+from app.task_action_service import execute_batch_task_action, execute_task_action
 from app.weekly_digest_service import execute_weekly_digest_pipeline
+from app.workspace_service import append_blocks_to_document
 from app.url_digest_service import (
     execute_url_digest_background_pipeline,
     extract_urls,
     is_url_dominant_message,
 )
 from app.schemas import (
+    BatchTaskActionAnalysis,
+    DocumentAppendAnalysis,
     LearningRequest,
     LeetcodeReviewRequest,
+    MemoryGovernanceAnalysis,
     MindEntry,
     ModuleClassification,
     SearchQueryAnalysis,
+    TaskActionAnalysis,
     TaskAnalysis,
     TelegramWebhookUpdate,
     WebhookResponse,
@@ -37,6 +44,47 @@ from app.schemas import (
 )
 from app.telegram_client import TelegramAssistantClient
 from app.whatsapp_client import WhatsAppAssistantClient
+from app.motion import (
+    AccountabilityMonitor,
+    CausalAttributionTree,
+    CognitiveEnergyReport,
+    DailyCheckInPrompt,
+    DecisionStatus,
+    EvidenceIngestionEngine,
+    EvidenceIngestionEvent,
+    EvidenceItem,
+    ExecutiveBriefing,
+    HumanOverride,
+    InitiativeMilestone,
+    MotionConsultationResponse,
+    MotionIdentity,
+    MotionInitiative,
+    MotionTrajectory,
+    MotionWeeklyReview,
+    MultiHopAttributionEngine,
+    MultiWindowSynthesisEngine,
+    PersonaType,
+    ScenarioSimulationRequest,
+    ScenarioSimulationResult,
+    SocraticInquiryResult,
+    StrategicDriftDetector,
+    StrategicDriftReport,
+    accountability_monitor,
+    drift_detector,
+    energy_monitor,
+    evidence_ingestion_engine,
+    executive_briefing_engine,
+    milestone_engine,
+    motion_mentorship_service,
+    motion_review_service,
+    motion_storage,
+    multi_hop_attribution_engine,
+    persona_router,
+    scenario_engine,
+    socratic_engine,
+    strategic_model_service,
+    synthesis_engine,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app.main")
@@ -67,11 +115,16 @@ def get_gemini_model() -> str:
 
 STAGE1_SYSTEM_INSTRUCTION = (
     "You are a lightweight intent routing classifier. Classify the user's message into exactly one MODULE:\n"
-    "- TASKS: Creating or querying tasks, managing to-do items, updating task status, checking today's or pending tasks, priority queries (e.g. 'high priority tasks', 'tasks tagged notes'), and conversational follow-ups (e.g. 'others?', 'show more', 'next', 'what else?').\n"
+    "- TASKS: Creating single new tasks, querying pending or today's tasks, priority queries (e.g. 'high priority tasks'), and conversational follow-ups (e.g. 'others?', 'show more', 'next').\n"
+    "- TASK_ACTION: Modifying a specific existing task ('mark Berkshire Dining done', 'done with GPAF form', 'postpone Berkshire Dining to next Tuesday', 'delete duplicate task').\n"
+    "- BATCH_TASK_ACTION: Executing batch task commands across multiple tasks ('mark all UMass tasks as done', 'postpone all high priority items by 3 days', 'archive all completed tasks').\n"
+    "- DOCUMENT_APPEND: Appending ideas, thoughts, bullets, or to-do notes directly into existing Notion document pages ('add Build AI voice agent to Ideas for projects', 'append to Year 1 Budget: Laptop insurance 200 USD', 'add note to Finances for Umass fall: Email bursar').\n"
+    "- MEMORY_CONTROL: Memory governance, forgetting stale facts, updating long-term memory, or memory inspection commands ('forget grad school application notes', 'update memory: I am now a student at UMass', 'what do you remember about UMass?', 'forget X').\n"
     "- MIND: Substack drafts, journaling, brain dumps, rambling, daily reflections/logs, personal thoughts. NOTE: Short conversational follow-up questions (e.g. 'others?', 'what about tomorrow?') are NOT Mind entries; they belong to TASKS.\n"
     "- LEARNING: Explicit new study topic requests, learning roadmaps, syllabus inquiries (e.g. 'i want to learn about Gemini AI', 'explore gemma models', 'build study plan for transformers').\n"
     "- LEETCODE: LeetCode problem review requests, algorithm practice notes, problem solution tracking.\n"
     "- DIGEST: Requests for weekly velocity summaries, weekly review, or retrospective (e.g. 'how was my week?', 'weekly digest', 'weekly velocity', 'run weekly review').\n"
+    "- MOTION: Strategic trajectory inquiries, mentorship questions, accountability check-ins, or explicit @motion requests ('@motion what is my biggest opportunity?', 'motion: evaluate my trajectory', 'strategic review of my projects', 'what are my biggest strategic risks?').\n"
     "- SEARCH: Inquiries querying past notes, search questions, folder exploration (e.g. 'what's in my notes?', 'what is in miscellaneous?', 'show my notes folder'), document inspection (e.g. 'what's in that year one budget?', 'tell me what's in finances for umass fall', 'did I write about finances for umass?'), archive suggestions (e.g. 'archive year one budget', 'send to archive'), or requests for information from the user's second brain.\n"
     "Pass the raw user message into the raw_text field."
 )
@@ -110,6 +163,161 @@ def classify_module_stage1(text: str, context: Optional[str] = None) -> ModuleCl
     except Exception as exc:
         logger.warning("Stage 1 classification failed (%s). Falling back to module=TASKS.", exc)
         return ModuleClassification(module="TASKS", raw_text=text)
+
+
+# --- Stage 2: Module-Specific Parsers ---
+
+STAGE2_MEMORY_CONTROL_INSTRUCTION = (
+    "Extract memory governance details from the user message:\n"
+    "- command: FORGET (if user asks to forget/delete memory like 'forget grad school notes', 'remove X from memory'), "
+    "UPDATE_STATUS (if user updates current status like 'update memory: I am enrolled at UMass', 'I started my MSCS'), "
+    "INSPECT_MEMORY (if user asks what Ocean remembers like 'what do you remember about UMass?', 'show memory for X').\n"
+    "- target_entity: The core entity or topic name.\n"
+    "- new_state_summary: Summary of updated memory thesis or state if updating status."
+)
+
+
+def parse_memory_control_stage2(text: str, context: Optional[str] = None) -> MemoryGovernanceAnalysis:
+    """Stage 2: Parse MEMORY_CONTROL module intent using gemini-3.5-flash-lite."""
+    try:
+        client = get_gemini_client()
+        model_name = get_gemini_model()
+        prompt_content = f"Recent conversation context:\n{context}\n\nUser message: {text}" if context else text
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt_content,
+            config=types.GenerateContentConfig(
+                system_instruction=STAGE2_MEMORY_CONTROL_INSTRUCTION,
+                response_mime_type="application/json",
+                response_schema=MemoryGovernanceAnalysis,
+            ),
+        )
+        if response.parsed:
+            if isinstance(response.parsed, MemoryGovernanceAnalysis):
+                return response.parsed
+            return MemoryGovernanceAnalysis.model_validate(response.parsed)
+        elif response.text:
+            return MemoryGovernanceAnalysis.model_validate_json(response.text)
+        else:
+            raise ValueError("Empty response from Gemini Stage 2 MEMORY_CONTROL parser")
+    except Exception as exc:
+        logger.warning("Stage 2 MEMORY_CONTROL parsing failed (%s). Falling back to default MemoryGovernanceAnalysis.", exc)
+        return MemoryGovernanceAnalysis(command="FORGET", target_entity=text)
+
+
+STAGE2_BATCH_TASK_ACTION_INSTRUCTION = (
+    "Extract batch task action details from the user message:\n"
+    "- action: MARK_DONE, MARK_IN_PROGRESS, UPDATE_DUE_DATE, or DELETE_TASK.\n"
+    "- tag_filter: Optional tag filter (e.g. UMass Admin, Leetcode, Finances).\n"
+    "- priority_filter: Optional priority filter (High, Medium, Low).\n"
+    "- target_query: Optional search keyword matching multiple tasks.\n"
+    "- new_due_date_iso: Resolved YYYY-MM-DD due date if updating due date.\n"
+    "- new_status_name: Done, In progress, or Not started."
+)
+
+
+def parse_batch_task_action_stage2(text: str, context: Optional[str] = None) -> BatchTaskActionAnalysis:
+    """Stage 2: Parse BATCH_TASK_ACTION module intent using gemini-3.5-flash-lite."""
+    try:
+        client = get_gemini_client()
+        model_name = get_gemini_model()
+        prompt_content = f"Recent conversation context:\n{context}\n\nUser message: {text}" if context else text
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt_content,
+            config=types.GenerateContentConfig(
+                system_instruction=STAGE2_BATCH_TASK_ACTION_INSTRUCTION,
+                response_mime_type="application/json",
+                response_schema=BatchTaskActionAnalysis,
+            ),
+        )
+        if response.parsed:
+            if isinstance(response.parsed, BatchTaskActionAnalysis):
+                return response.parsed
+            return BatchTaskActionAnalysis.model_validate(response.parsed)
+        elif response.text:
+            return BatchTaskActionAnalysis.model_validate_json(response.text)
+        else:
+            raise ValueError("Empty response from Gemini Stage 2 BATCH_TASK_ACTION parser")
+    except Exception as exc:
+        logger.warning("Stage 2 BATCH_TASK_ACTION parsing failed (%s). Falling back to default BatchTaskActionAnalysis.", exc)
+        return BatchTaskActionAnalysis(action="MARK_DONE", target_query=text)
+
+
+# --- Stage 2: Module-Specific Parsers ---
+
+STAGE2_TASK_ACTION_INSTRUCTION = (
+    "Extract task modification details from the user message:\n"
+    "- action: MARK_DONE (e.g. 'done with X', 'mark X done', 'complete X'), MARK_IN_PROGRESS (e.g. 'set X to in progress', 'working on X'), UPDATE_DUE_DATE (e.g. 'postpone X to tuesday', 'move X to August 30', 'push X to tomorrow'), DELETE_TASK (e.g. 'delete X', 'remove X from tasks', 'archive X task').\n"
+    "- task_target_title: Target task title or keywords to match.\n"
+    "- new_due_date_iso: Resolved due date in YYYY-MM-DD format if updating due date.\n"
+    "- new_status_name: Done, In progress, or Not started.\n"
+    "- ordinal_index: 1 for first task, 2 for second task, etc. if user referred to position."
+)
+
+
+def parse_task_action_stage2(text: str, context: Optional[str] = None) -> TaskActionAnalysis:
+    """Stage 2: Parse TASK_ACTION module intent using gemini-3.5-flash-lite."""
+    try:
+        client = get_gemini_client()
+        model_name = get_gemini_model()
+        prompt_content = f"Recent conversation context:\n{context}\n\nUser message: {text}" if context else text
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt_content,
+            config=types.GenerateContentConfig(
+                system_instruction=STAGE2_TASK_ACTION_INSTRUCTION,
+                response_mime_type="application/json",
+                response_schema=TaskActionAnalysis,
+            ),
+        )
+        if response.parsed:
+            if isinstance(response.parsed, TaskActionAnalysis):
+                return response.parsed
+            return TaskActionAnalysis.model_validate(response.parsed)
+        elif response.text:
+            return TaskActionAnalysis.model_validate_json(response.text)
+        else:
+            raise ValueError("Empty response from Gemini Stage 2 TASK_ACTION parser")
+    except Exception as exc:
+        logger.warning("Stage 2 TASK_ACTION parsing failed (%s). Falling back to default TaskActionAnalysis.", exc)
+        return TaskActionAnalysis(action="MARK_DONE", task_target_title=text)
+
+
+STAGE2_DOCUMENT_APPEND_INSTRUCTION = (
+    "Extract document append details from the user message:\n"
+    "- target_document_title: Exact title of target document or container page (e.g. 'Ideas for projects', 'Year 1 Budget', 'Finances for Umass fall', 'Notes').\n"
+    "- content_to_append: The bullet point, idea, thought, or item text to append into the document.\n"
+    "- block_type: 'bulleted_list_item' (default), 'to_do', 'paragraph', or 'callout'."
+)
+
+
+def parse_document_append_stage2(text: str, context: Optional[str] = None) -> DocumentAppendAnalysis:
+    """Stage 2: Parse DOCUMENT_APPEND module details using gemini-3.5-flash-lite."""
+    try:
+        client = get_gemini_client()
+        model_name = get_gemini_model()
+        prompt_content = f"Recent conversation context:\n{context}\n\nUser message: {text}" if context else text
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt_content,
+            config=types.GenerateContentConfig(
+                system_instruction=STAGE2_DOCUMENT_APPEND_INSTRUCTION,
+                response_mime_type="application/json",
+                response_schema=DocumentAppendAnalysis,
+            ),
+        )
+        if response.parsed:
+            if isinstance(response.parsed, DocumentAppendAnalysis):
+                return response.parsed
+            return DocumentAppendAnalysis.model_validate(response.parsed)
+        elif response.text:
+            return DocumentAppendAnalysis.model_validate_json(response.text)
+        else:
+            raise ValueError("Empty response from Gemini Stage 2 DOCUMENT_APPEND parser")
+    except Exception as exc:
+        logger.warning("Stage 2 DOCUMENT_APPEND parsing failed (%s). Falling back to default DocumentAppendAnalysis.", exc)
+        return DocumentAppendAnalysis(target_document_title="Notes", content_to_append=text)
 
 
 # --- Stage 2: Module-Specific Parsers ---
@@ -372,6 +580,14 @@ def analyze_user_text_two_stage(
 
     if module == "TASKS":
         parsed = parse_tasks_stage2(raw_text, context=context) if context else parse_tasks_stage2(raw_text)
+    elif module == "TASK_ACTION":
+        parsed = parse_task_action_stage2(raw_text, context=context) if context else parse_task_action_stage2(raw_text)
+    elif module == "BATCH_TASK_ACTION":
+        parsed = parse_batch_task_action_stage2(raw_text, context=context) if context else parse_batch_task_action_stage2(raw_text)
+    elif module == "DOCUMENT_APPEND":
+        parsed = parse_document_append_stage2(raw_text, context=context) if context else parse_document_append_stage2(raw_text)
+    elif module == "MEMORY_CONTROL":
+        parsed = parse_memory_control_stage2(raw_text, context=context) if context else parse_memory_control_stage2(raw_text)
     elif module == "MIND":
         parsed = parse_mind_stage2(raw_text)
     elif module == "LEARNING":
@@ -381,6 +597,8 @@ def analyze_user_text_two_stage(
     elif module == "SEARCH":
         parsed = parse_search_stage2(raw_text, context=context) if context else parse_search_stage2(raw_text)
     elif module == "DIGEST":
+        parsed = raw_text
+    elif module == "MOTION":
         parsed = raw_text
     else:
         parsed = parse_tasks_stage2(raw_text, context=context) if context else parse_tasks_stage2(raw_text)
@@ -461,6 +679,55 @@ def _extract_whatsapp_message(payload: Dict[str, Any]) -> Tuple[Optional[str], O
     return ev.get("sender"), ev.get("text")
 
 
+async def handle_pending_menu_reply(
+    sender_id: str,
+    text: str,
+    notion_client: NotionAssistantClient,
+) -> Optional[str]:
+    """Check if user text resolves a pending interactive disambiguation menu."""
+    pending_menu = conversation_memory.get_pending_menu(sender_id)
+    if not pending_menu:
+        return None
+
+    clean = text.strip().lower()
+    idx = None
+    if clean in ("1", "1st", "first", "option 1", "choice 1", "#1"):
+        idx = 0
+    elif clean in ("2", "2nd", "second", "option 2", "choice 2", "#2"):
+        idx = 1
+    elif clean in ("3", "3rd", "third", "option 3", "choice 3", "#3"):
+        idx = 2
+
+    candidates = pending_menu.get("candidates", [])
+    if idx is not None and 0 <= idx < len(candidates):
+        selected_item = candidates[idx]
+        conversation_memory.clear_pending_menu(sender_id)
+
+        module = pending_menu.get("module")
+        if module == "TASK_ACTION":
+            raw_action = pending_menu.get("action_analysis", {})
+            action_analysis = TaskActionAnalysis.model_validate(raw_action)
+            # Perform action on selected item directly
+            page_id = selected_item.get("page_id")
+            task_title = selected_item.get("title", "Untitled")
+            task_url = selected_item.get("url", "#")
+            action_type = action_analysis.action
+
+            if action_type == TaskActionType.MARK_DONE:
+                status_name = action_analysis.new_status_name or "Done"
+                notion_client.client.pages.update(page_id=page_id, properties={"Status": {"status": {"name": status_name}}})
+                return f"✅ Selected **#{idx+1}**: Marked **[{task_title}]({task_url})** as *{status_name}*!"
+            elif action_type == TaskActionType.MARK_IN_PROGRESS:
+                status_name = action_analysis.new_status_name or "In progress"
+                notion_client.client.pages.update(page_id=page_id, properties={"Status": {"status": {"name": status_name}}})
+                return f"🔄 Selected **#{idx+1}**: Set **[{task_title}]({task_url})** to *{status_name}*!"
+            elif action_type == TaskActionType.DELETE_TASK:
+                notion_client.client.pages.update(page_id=page_id, archived=True)
+                return f"🗑️ Selected **#{idx+1}**: Archived **[{task_title}]({task_url})**!"
+
+    return None
+
+
 async def _handle_module_action(
     module: str,
     parsed_result: Any,
@@ -468,8 +735,67 @@ async def _handle_module_action(
     notion_client: NotionAssistantClient,
     sender_id: Optional[str] = None,
 ) -> str:
-    """Execute standard synchronous actions for TASKS, MIND, and LEETCODE modules."""
-    if module == "TASKS":
+    """Execute standard synchronous actions for TASKS, TASK_ACTION, BATCH_TASK_ACTION, DOCUMENT_APPEND, MEMORY_CONTROL, and MIND modules."""
+    if module == "MEMORY_CONTROL":
+        mem_analysis: MemoryGovernanceAnalysis = parsed_result
+        cmd = mem_analysis.command
+        target = mem_analysis.target_entity or text
+
+        if cmd == "FORGET":
+            count, forgotten = graph_memory.forget_entity(target)
+            if count > 0:
+                return f"🧠 *Memory Updated!* Soft-deleted {count} graph entity node(s) matching *'{target}'*:\n" + "\n".join(f"• ~{n}~" for n in forgotten)
+            return f"🧠 *Memory Inspection:* No active knowledge graph nodes found matching *'{target}'*."
+
+        elif cmd == "UPDATE_STATUS":
+            summary = mem_analysis.new_state_summary or f"Updated status to {target}"
+            count = graph_memory.supersede_nodes(target, target, reason=summary)
+            node = graph_memory.add_node(target, summary=summary, status="ACTIVE")
+            return f"🧠 *Knowledge Graph Updated!*\n\n📌 **{node['name']}**: {summary}\n*(Superseded {count} older related nodes.)*"
+
+        elif cmd in ("INSPECT_MEMORY", "SYNC_GRAPH"):
+            if "sync" in text.lower() or cmd == "SYNC_GRAPH":
+                sync_res = graph_memory.sync_graph_to_notion(notion_client)
+                return sync_res.get("reply_text", "Knowledge Graph synced to Notion!")
+            nodes = graph_memory.query_active_knowledge(query=target, limit=10)
+            if nodes:
+                lines = [f"• *{n['name']}* [{n['entity_type']}]: {n.get('summary', 'Active')}" for n in nodes]
+                return f"🧠 *Active Knowledge Graph ({len(nodes)} items):*\n" + "\n".join(lines)
+            return f"🧠 *Knowledge Graph:* No active nodes found matching *'{target}'*."
+
+        return "🧠 Memory governance action processed."
+
+    elif module == "BATCH_TASK_ACTION":
+        batch_analysis: BatchTaskActionAnalysis = parsed_result
+        batch_res = await run_in_threadpool(
+            execute_batch_task_action,
+            batch_analysis=batch_analysis,
+            notion_client=notion_client,
+        )
+        return batch_res.get("reply_text", "Batch action complete!")
+
+    elif module == "TASK_ACTION":
+        action_analysis: TaskActionAnalysis = parsed_result
+        action_res = await run_in_threadpool(
+            execute_task_action,
+            action_analysis=action_analysis,
+            notion_client=notion_client,
+            user_id=sender_id,
+        )
+        return action_res.get("reply_text", "Done!")
+
+    elif module == "DOCUMENT_APPEND":
+        append_analysis: DocumentAppendAnalysis = parsed_result
+        append_res = await run_in_threadpool(
+            append_blocks_to_document,
+            target_title_or_id=append_analysis.target_document_title,
+            content=append_analysis.content_to_append,
+            block_type=append_analysis.block_type,
+            notion_client=notion_client,
+        )
+        return append_res.get("reply_text", "Done!")
+
+    elif module == "TASKS":
         parsed_task: TaskAnalysis = parsed_result
         intent = parsed_task.intent
 
@@ -550,6 +876,10 @@ async def _handle_module_action(
                 )
 
             if today_items:
+                if sender_id:
+                    today_dicts = [item if isinstance(item, dict) else (item.model_dump() if hasattr(item, "model_dump") else getattr(item, "__dict__", {})) for item in today_items]
+                    conversation_memory.set_last_query_results(sender_id, today_dicts)
+
                 header = "📅 *Today's Tasks"
                 if p_filter:
                     header += f" ({p_filter} Priority)"
@@ -617,6 +947,10 @@ async def _handle_module_action(
                 )
 
             if pending_items:
+                if sender_id:
+                    pending_dicts = [item if isinstance(item, dict) else (item.model_dump() if hasattr(item, "model_dump") else getattr(item, "__dict__", {})) for item in pending_items]
+                    conversation_memory.set_last_query_results(sender_id, pending_dicts)
+
                 header = "📋 *Pending Tasks"
                 if p_filter:
                     header += f" ({p_filter} Priority)"
@@ -730,6 +1064,16 @@ async def _handle_module_action(
             conversation_memory.update_query_state(sender_id, last_module="DIGEST", last_intent="GENERATE_DIGEST")
         return digest_res.get("digest_text", "")
 
+    elif module == "MOTION":
+        motion_reply = await run_in_threadpool(
+            persona_router.process_motion_request,
+            text=text,
+            sender_id=sender_id,
+        )
+        if sender_id:
+            conversation_memory.update_query_state(sender_id, last_module="MOTION", last_intent="STRATEGIC_CONSULTATION")
+        return motion_reply
+
     else:
         return f"📝 *Recorded:*\n{text}"
 
@@ -816,12 +1160,44 @@ async def whatsapp_webhook(
             )
             return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
 
-    # 1. Add user message to conversation memory & get rolling context
+    # 0. Check for interactive disambiguation menu reply
+    pending_menu_reply = await handle_pending_menu_reply(sender_phone, text, notion_client)
+    if pending_menu_reply:
+        try:
+            await run_in_threadpool(whatsapp_client.send_message, to=sender_phone, text=pending_menu_reply)
+            conversation_memory.add_assistant_message(sender_phone, pending_menu_reply, module="TASK_ACTION")
+        except Exception as wa_err:
+            logger.error("Failed to send WhatsApp menu reply: %s", wa_err)
+        return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
+
+    # 0.5 Check for Motion Persona Routing (@motion or motion:)
+    if persona_router.is_motion_invoked(text):
+        conversation_memory.add_user_message(sender_phone, text)
+        reply_text = await run_in_threadpool(
+            persona_router.process_motion_request,
+            text=text,
+            sender_id=sender_phone,
+        )
+        try:
+            await run_in_threadpool(whatsapp_client.send_message, to=sender_phone, text=reply_text)
+            conversation_memory.add_assistant_message(sender_phone, reply_text, module="MOTION")
+        except Exception as wa_err:
+            logger.error("Failed to send WhatsApp Motion reply: %s", wa_err)
+        return PlainTextResponse(content="EVENT_RECEIVED", status_code=200)
+
+    # 1. Add user message to conversation memory & get rolling context + graph memory
     conversation_memory.add_user_message(sender_phone, text)
     context = conversation_memory.format_context_prompt(sender_phone, max_turns=4)
+    graph_ctx = graph_memory.format_graph_context_for_prompt(text)
+    if graph_ctx:
+        context = f"{graph_ctx}\n\n{context}" if context else graph_ctx
 
     # 2. Two-Stage Gemini Classification & Parsing with Context
     module, parsed_result = await run_in_threadpool(analyze_user_text_two_stage, text, context=context)
+
+    # Enqueue background entity extraction for knowledge modules
+    if module in ("MIND", "LEARNING", "LEETCODE", "DOCUMENT_APPEND"):
+        background_tasks.add_task(graph_memory.extract_and_index_entities_from_text, text, module)
 
     if module == "LEARNING":
         # 1. Immediately reply on WhatsApp with short acknowledgement
@@ -1009,12 +1385,46 @@ async def telegram_webhook(
             )
             return {"status": "ok"}
 
-    # 1. Add user message to conversation memory & get rolling context
+    # 0. Check for interactive disambiguation menu reply
+    pending_menu_reply = await handle_pending_menu_reply(sender_id, text, notion_client)
+    if pending_menu_reply:
+        if chat_id:
+            try:
+                await run_in_threadpool(telegram_client.send_message, text=pending_menu_reply, chat_id=str(chat_id))
+                conversation_memory.add_assistant_message(sender_id, pending_menu_reply, module="TASK_ACTION")
+            except Exception as tg_err:
+                logger.error("Failed to send Telegram menu reply: %s", tg_err)
+        return {"status": "ok"}
+
+    # 0.5 Check for Motion Persona Routing (@motion or motion:)
+    if persona_router.is_motion_invoked(text):
+        conversation_memory.add_user_message(sender_id, text)
+        reply_text = await run_in_threadpool(
+            persona_router.process_motion_request,
+            text=text,
+            sender_id=sender_id,
+        )
+        if chat_id:
+            try:
+                await run_in_threadpool(telegram_client.send_message, text=reply_text, chat_id=str(chat_id))
+                conversation_memory.add_assistant_message(sender_id, reply_text, module="MOTION")
+            except Exception as tg_err:
+                logger.error("Failed to send Telegram Motion reply: %s", tg_err)
+        return {"status": "ok"}
+
+    # 1. Add user message to conversation memory & get rolling context + graph memory
     conversation_memory.add_user_message(sender_id, text)
     context = conversation_memory.format_context_prompt(sender_id, max_turns=4)
+    graph_ctx = graph_memory.format_graph_context_for_prompt(text)
+    if graph_ctx:
+        context = f"{graph_ctx}\n\n{context}" if context else graph_ctx
 
     # 3 & 4. Two-Stage Gemini Classification and Parsing with Context
     module, parsed_result = await run_in_threadpool(analyze_user_text_two_stage, text, context=context)
+
+    # Enqueue background entity extraction for knowledge modules
+    if module in ("MIND", "LEARNING", "LEETCODE", "DOCUMENT_APPEND"):
+        background_tasks.add_task(graph_memory.extract_and_index_entities_from_text, text, module)
 
     # If module is LEARNING, acknowledge immediately and enqueue background task
     if module == "LEARNING":
@@ -1130,5 +1540,294 @@ async def telegram_webhook(
             exc,
         )
         return {"status": "error", "message": str(exc)}
+
+
+# ==========================================
+# --- Ocean Motion REST Endpoints (v4.0) ---
+# ==========================================
+
+@app.post("/motion/consult", response_model=Dict[str, Any])
+async def motion_consult(request: Request):
+    """Direct strategic consultation endpoint for Motion persona."""
+    body = await request.json()
+    message = body.get("message", "")
+    sender_id = body.get("sender_id", "direct_api")
+    if not message:
+        raise HTTPException(status_code=400, detail="Missing required 'message' in request body.")
+
+    response = await run_in_threadpool(
+        motion_mentorship_service.consult,
+        user_message=message,
+        sender_id=sender_id,
+    )
+    return response.model_dump()
+
+
+@app.get("/motion/trajectory", response_model=Dict[str, Any])
+async def get_motion_trajectory():
+    """Retrieve current strategic trajectory."""
+    trajectory = await run_in_threadpool(strategic_model_service.get_trajectory)
+    return trajectory.model_dump()
+
+
+@app.get("/motion/identity", response_model=Dict[str, Any])
+async def get_motion_identity():
+    """Retrieve stable user identity."""
+    identity = await run_in_threadpool(strategic_model_service.get_identity)
+    return identity.model_dump()
+
+
+@app.put("/motion/identity", response_model=Dict[str, Any])
+async def update_motion_identity(identity: MotionIdentity):
+    """Explicitly update user identity (never inferred)."""
+    updated = await run_in_threadpool(
+        strategic_model_service.update_identity,
+        new_identity=identity,
+        explicit_user_confirmation=True,
+    )
+    return updated.model_dump()
+
+
+@app.get("/motion/initiatives", response_model=List[Dict[str, Any]])
+async def get_motion_initiatives(status: Optional[str] = Query(None)):
+    """Retrieve strategic initiatives, optionally filtered by status."""
+    inits = await run_in_threadpool(strategic_model_service.get_initiatives, status=status)
+    return [init.model_dump() for init in inits]
+
+
+@app.post("/motion/initiatives", response_model=Dict[str, Any])
+async def create_or_update_initiative(initiative: MotionInitiative):
+    """Create or update a strategic initiative."""
+    saved = await run_in_threadpool(strategic_model_service.create_or_update_initiative, initiative=initiative)
+    return saved.model_dump()
+
+
+@app.get("/motion/decision-journal", response_model=List[Dict[str, Any]])
+async def get_decision_journal(status: Optional[str] = Query(None)):
+    """Retrieve Decision Journal records."""
+    target_status = DecisionStatus(status) if status else None
+    decisions = await run_in_threadpool(strategic_model_service.get_decisions, status=target_status)
+    return [d.model_dump() for d in decisions]
+
+
+@app.post("/motion/decision-journal/{decision_id}/review", response_model=Dict[str, Any])
+async def review_decision_journal_entry(decision_id: str, request: Request):
+    """Submit actual outcome and user reflection to review and close a Decision Journal record."""
+    body = await request.json()
+    outcome = body.get("actual_outcome", "")
+    reflection = body.get("user_reflection")
+    if not outcome:
+        raise HTTPException(status_code=400, detail="Missing required 'actual_outcome' field.")
+
+    updated = await run_in_threadpool(
+        motion_mentorship_service.handle_decision_review,
+        decision_id=decision_id,
+        actual_outcome=outcome,
+        user_reflection=reflection,
+    )
+    return updated.model_dump()
+
+
+@app.post("/motion/overrides", response_model=Dict[str, Any])
+async def record_motion_override(override: HumanOverride):
+    """Record an explicit human override with a condition-based review trigger."""
+    saved = await run_in_threadpool(strategic_model_service.record_override, override=override)
+    return saved.model_dump()
+
+
+@app.post("/motion/review/weekly", response_model=Dict[str, Any])
+async def trigger_motion_weekly_review(
+    week_start: Optional[str] = Query(None),
+    week_end: Optional[str] = Query(None),
+):
+    """Trigger generation of a weekly strategic review."""
+    review = await run_in_threadpool(
+        motion_review_service.execute_weekly_review,
+        week_start=week_start,
+        week_end=week_end,
+    )
+    return review.model_dump()
+
+
+@app.post("/motion/review/daily", response_model=Dict[str, Any])
+async def trigger_motion_daily_review(request: Request):
+    """Trigger processing of daily activities into atomic evidence and observations."""
+    body = await request.json()
+    activities = body.get("activities", [])
+    date_str = body.get("date")
+    result = await run_in_threadpool(
+        motion_review_service.execute_daily_review,
+        raw_activities=activities,
+        date_str=date_str,
+    )
+    return result
+
+
+@app.get("/motion/provenance/{target_id}", response_model=Dict[str, Any])
+async def get_motion_provenance(target_id: str):
+    """Explain reasoning and trace provenance for a conclusion or observation ('Why do I believe this?')."""
+    explanation = await run_in_threadpool(strategic_model_service.explain_belief, target_id=target_id)
+    return explanation
+
+
+# --- Motion v2 Endpoints ---
+@app.get("/motion/drift", response_model=Dict[str, Any])
+async def get_motion_drift_report(
+    window_days: int = Query(7, ge=1, le=60),
+    reference_date: Optional[str] = Query(None),
+):
+    """Evaluate and retrieve current Strategic Drift and Alignment Report."""
+    report = await run_in_threadpool(
+        drift_detector.evaluate_drift,
+        window_days=window_days,
+        reference_date=reference_date,
+        save_report=True,
+    )
+    return report.model_dump()
+
+
+@app.get("/motion/evidence", response_model=List[Dict[str, Any]])
+async def list_motion_evidence(
+    limit: int = Query(50, ge=1, le=200),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+):
+    """Query discrete atomic evidence items."""
+    evidence_items = await run_in_threadpool(
+        motion_storage.load_evidence,
+        limit=limit,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    return [e.model_dump() for e in evidence_items]
+
+
+@app.post("/motion/evidence", response_model=Dict[str, Any])
+async def ingest_motion_evidence(event: EvidenceIngestionEvent):
+    """Ingest a single evidence event asynchronously or directly."""
+    evidence = await run_in_threadpool(evidence_ingestion_engine.ingest_event, event=event)
+    return evidence.model_dump()
+
+
+@app.post("/motion/synthesis", response_model=Dict[str, Any])
+async def trigger_motion_synthesis(reference_date: Optional[str] = Query(None)):
+    """Trigger multi-window observation and conclusion synthesis."""
+    observations, conclusions = await run_in_threadpool(
+        synthesis_engine.run_synthesis,
+        reference_date=reference_date,
+        save_records=True,
+    )
+    return {
+        "status": "ok",
+        "observations_generated": len(observations),
+        "conclusions_generated": len(conclusions),
+        "observation_ids": [o.id for o in observations],
+        "conclusion_ids": [c.id for c in conclusions],
+    }
+
+
+@app.get("/motion/attribution/{target_id}", response_model=Dict[str, Any])
+async def get_motion_attribution(target_id: str):
+    """Retrieve full multi-hop causal attribution tree for an item."""
+    tree = await run_in_threadpool(multi_hop_attribution_engine.build_attribution_tree, target_id=target_id)
+    return tree.model_dump()
+
+
+@app.get("/motion/checkin", response_model=Dict[str, Any])
+async def get_motion_daily_checkin(current_date: Optional[str] = Query(None)):
+    """Generate daily proactive strategic check-in status prompt."""
+    drift_report = await run_in_threadpool(
+        drift_detector.evaluate_drift,
+        window_days=7,
+        reference_date=current_date,
+        save_report=False,
+    )
+    checkin = await run_in_threadpool(
+        accountability_monitor.generate_daily_checkin,
+        current_date=current_date,
+        drift_report=drift_report,
+    )
+    return checkin.model_dump()
+
+
+# --- Motion v3 REST Endpoints ---
+
+@app.post("/motion/simulate", response_model=Dict[str, Any])
+async def simulate_motion_scenario(request: ScenarioSimulationRequest):
+    """Simulate what-if time and priority reallocation scenario."""
+    result = await run_in_threadpool(
+        scenario_engine.simulate_scenario,
+        request=request,
+        save_result=True,
+    )
+    return result.model_dump()
+
+
+@app.get("/motion/energy", response_model=Dict[str, Any])
+async def get_motion_energy_report(
+    window_days: int = Query(7, ge=1, le=30),
+    reference_date: Optional[str] = Query(None),
+):
+    """Retrieve cognitive sustainability and fatigue risk evaluation."""
+    report = await run_in_threadpool(
+        energy_monitor.evaluate_sustainability,
+        window_days=window_days,
+        reference_date=reference_date,
+        save_report=True,
+    )
+    return report.model_dump()
+
+
+@app.get("/motion/milestones", response_model=List[Dict[str, Any]])
+async def get_motion_milestones(initiative_id: Optional[str] = Query(None)):
+    """Retrieve active initiative milestones."""
+    milestones = await run_in_threadpool(
+        milestone_engine.get_milestones,
+        initiative_id=initiative_id,
+    )
+    return [m.model_dump() for m in milestones]
+
+
+@app.post("/motion/milestones", response_model=Dict[str, Any])
+async def create_motion_milestone(milestone: InitiativeMilestone):
+    """Create or update an initiative milestone."""
+    saved_ms = await run_in_threadpool(milestone_engine.record_milestone, milestone=milestone)
+    return saved_ms.model_dump()
+
+
+@app.get("/motion/milestones/critical-path", response_model=Dict[str, Any])
+async def get_motion_critical_path(
+    initiative_id: Optional[str] = Query(None),
+    reference_date: Optional[str] = Query(None),
+):
+    """Analyze critical path DAG and detect milestone schedule bottlenecks."""
+    analysis = await run_in_threadpool(
+        milestone_engine.analyze_critical_path,
+        initiative_id=initiative_id,
+        reference_date=reference_date,
+    )
+    return analysis
+
+
+@app.get("/motion/briefing", response_model=Dict[str, Any])
+async def get_motion_executive_briefing(
+    window_days: int = Query(7, ge=1, le=30),
+    reference_date: Optional[str] = Query(None),
+):
+    """Generate or retrieve autonomous weekly executive strategic briefing."""
+    briefing = await run_in_threadpool(
+        executive_briefing_engine.generate_briefing,
+        window_days=window_days,
+        reference_date=reference_date,
+        save_briefing=True,
+    )
+    return briefing.model_dump()
+
+
+@app.post("/motion/socratic", response_model=Dict[str, Any])
+async def conduct_motion_socratic_inquiry(topic: str = Body(..., embed=True)):
+    """Perform Socratic assumption deconstruction and pre-mortem failure analysis."""
+    inquiry = await run_in_threadpool(socratic_engine.conduct_inquiry, topic=topic)
+    return inquiry.model_dump()
 
 

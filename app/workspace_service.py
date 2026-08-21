@@ -22,6 +22,7 @@ except ImportError:
     types = None
 
 from app.config import settings
+from app.matcher import entity_resolver
 from app.notion_client import NotionAssistantClient, clean_math_and_markdown
 from app.schemas import (
     FolderExploreResult,
@@ -263,52 +264,21 @@ def _find_best_node_match(
     nodes: Dict[str, WorkspacePageNode],
     is_container_preferred: bool = False,
 ) -> Optional[WorkspacePageNode]:
-    """Find the best matching WorkspacePageNode using exact, substring, and fuzzy matching."""
+    """Find the best matching WorkspacePageNode using 3-tier Entity Resolution Cascade."""
     if not query or not nodes:
         return None
 
-    clean_q = query.strip().lower()
-    norm_q = _normalize_title_text(query)
-    q_tokens = set(norm_q.split())
+    candidate_list = list(nodes.values())
+    if is_container_preferred:
+        filtered = [n for n in candidate_list if n.is_container]
+        if filtered:
+            candidate_list = filtered
 
-    # 1. Exact match
-    for node in nodes.values():
-        title_lower = node.title.lower()
-        if clean_q == title_lower or norm_q == _normalize_title_text(node.title):
-            return node
-
-    # 2. Substring containment
-    for node in nodes.values():
-        norm_title = _normalize_title_text(node.title)
-        if (len(norm_q) >= 3 and norm_q in norm_title) or (len(norm_title) >= 3 and norm_title in norm_q):
-            return node
-
-    # 3. Fuzzy SequenceMatcher + Token overlap scoring
-    best_node = None
-    best_score = 0.0
-
-    for node in nodes.values():
-        norm_title = _normalize_title_text(node.title)
-        title_tokens = set(norm_title.split())
-
-        # Compute token overlap ratio
-        overlap = len(q_tokens.intersection(title_tokens))
-        overlap_score = overlap / max(len(q_tokens), 1)
-
-        # Compute sequence matcher similarity
-        seq_ratio = difflib.SequenceMatcher(None, norm_q, norm_title).ratio()
-
-        total_score = (overlap_score * 0.6) + (seq_ratio * 0.4)
-
-        if is_container_preferred and node.is_container:
-            total_score += 0.2
-        elif not is_container_preferred and not node.is_container:
-            total_score += 0.1
-
-        if total_score > best_score and total_score >= 0.40:
-            best_score = total_score
-            best_node = node
-
+    best_node, tier, score = entity_resolver.resolve_entity(
+        query=query,
+        candidates=candidate_list,
+        key_fn=lambda n: n.title,
+    )
     return best_node
 
 
@@ -763,3 +733,151 @@ def suggest_page_archival(
         "breadcrumb": inspect_res.breadcrumb,
         "reply_text": clean_math_and_markdown(reply),
     }
+
+
+# --- Ocean v3.0: In-Place Document Appending ---
+
+def find_page_node_in_workspace(
+    query: str,
+    notion_client: Optional[NotionAssistantClient] = None,
+    is_container_preferred: bool = False,
+) -> Optional[WorkspacePageNode]:
+    """Find the best matching WorkspacePageNode across the hierarchy graph with search API fallback."""
+    notion = notion_client or NotionAssistantClient()
+    nodes = build_workspace_hierarchy_graph(notion_client=notion)
+
+    target_node = _find_best_node_match(query, nodes, is_container_preferred=is_container_preferred)
+
+    if not target_node and notion.client:
+        try:
+            res = notion._request_with_retry(
+                notion.client.search,
+                query=query,
+                filter={"property": "object", "value": "page"},
+                page_size=5,
+            )
+            for page in res.get("results", []):
+                p_id = page.get("id")
+                p_title = _extract_page_title(page)
+                if p_title:
+                    target_node = WorkspacePageNode(
+                        id=p_id,
+                        title=p_title,
+                        url=_extract_page_url(page),
+                        breadcrumb=p_title,
+                    )
+                    break
+        except Exception as exc:
+            logger.warning("Page search fallback failed: %s", exc)
+
+    return target_node
+
+
+def _build_notion_block(content: str, block_type: str = "bulleted_list_item") -> Dict[str, Any]:
+    """Construct Notion block JSON payload based on block_type."""
+    clean_content = content.strip()
+
+    if block_type == "to_do":
+        return {
+            "object": "block",
+            "type": "to_do",
+            "to_do": {
+                "rich_text": [{"type": "text", "text": {"content": clean_content}}],
+                "checked": False,
+            },
+        }
+    elif block_type == "callout":
+        return {
+            "object": "block",
+            "type": "callout",
+            "callout": {
+                "rich_text": [{"type": "text", "text": {"content": clean_content}}],
+                "icon": {"emoji": "💡"},
+            },
+        }
+    elif block_type == "paragraph":
+        return {
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {
+                "rich_text": [{"type": "text", "text": {"content": clean_content}}],
+            },
+        }
+    else:
+        # Default: bulleted_list_item
+        return {
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {
+                "rich_text": [{"type": "text", "text": {"content": clean_content}}],
+            },
+        }
+
+
+def append_blocks_to_document(
+    target_title_or_id: str,
+    content: str,
+    block_type: str = "bulleted_list_item",
+    notion_client: Optional[NotionAssistantClient] = None,
+) -> Dict[str, Any]:
+    """Appends new block (bullet point, to-do, paragraph, or callout) directly into an existing Notion document."""
+    notion = notion_client or NotionAssistantClient()
+
+    if notion.client is None:
+        return {
+            "status": "error",
+            "message": "Notion client not initialized.",
+            "reply_text": "❌ Notion integration is not configured or connected.",
+        }
+
+    # Resolve document location via workspace hierarchy graph
+    target_node = find_page_node_in_workspace(target_title_or_id, notion_client=notion)
+
+    if not target_node:
+        return {
+            "status": "not_found",
+            "message": f"Document '{target_title_or_id}' not found in workspace hierarchy.",
+            "reply_text": f"❓ Could not locate document **'{target_title_or_id}'** in your Notion workspace graph.",
+        }
+
+    page_id = target_node.id
+    page_title = target_node.title or target_title_or_id
+    page_url = target_node.url or f"https://notion.so/{page_id.replace('-', '')}"
+    breadcrumb = target_node.breadcrumb or page_title
+
+    block_payload = _build_notion_block(content, block_type=block_type)
+
+    try:
+        notion._request_with_retry(
+            notion.client.blocks.children.append,
+            block_id=page_id,
+            children=[block_payload],
+        )
+
+        icon_emoji = "•" if block_type == "bulleted_list_item" else ("☑️" if block_type == "to_do" else "📝")
+        reply = (
+            f"📝 *Appended to Note!*\n\n"
+            f"📌 **[{page_title}]({page_url})**\n"
+            f"📍 Location: *{breadcrumb}*\n\n"
+            f"✨ *Added item:*\n"
+            f"{icon_emoji} {content.strip()}"
+        )
+
+        return {
+            "status": "ok",
+            "page_title": page_title,
+            "page_url": page_url,
+            "breadcrumb": breadcrumb,
+            "block_type": block_type,
+            "content_appended": content.strip(),
+            "reply_text": clean_math_and_markdown(reply),
+        }
+
+    except Exception as exc:
+        logger.error("Failed to append block to page %s (%s): %s", page_title, page_id, exc, exc_info=True)
+        return {
+            "status": "error",
+            "message": str(exc),
+            "reply_text": f"❌ Failed to append content to **'{page_title}'**: {exc}",
+        }
+

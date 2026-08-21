@@ -26,6 +26,11 @@ htmlcov/
 .vscode/
 .idea/
 
+# Local Runtime Data & Scratch
+data/
+scratch/
+.motion_data/
+
 # OS & Logs
 .DS_Store
 *.log

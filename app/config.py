@@ -65,6 +65,7 @@ class Settings:
     WHATSAPP_TOKEN: str = os.getenv("WHATSAPP_TOKEN", "")
     WHATSAPP_PHONE_NUMBER_ID: str = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
     WHATSAPP_API_URL: str = os.getenv("WHATSAPP_API_URL", "https://graph.facebook.com/v20.0")
+    MOTION_DATA_DIR: str = os.getenv("MOTION_DATA_DIR", "data/motion")
 
 
 settings = Settings()

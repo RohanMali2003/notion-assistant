@@ -5,6 +5,7 @@ import pytest
 from app.schemas import SearchQueryAnalysis, WorkspacePageNode
 from app.search_service import execute_second_brain_search_pipeline
 from app.workspace_service import (
+    append_blocks_to_document,
     archive_page_to_archive_index,
     build_workspace_hierarchy_graph,
     explore_container,
@@ -252,3 +253,50 @@ def test_execute_second_brain_search_archive(mock_archive):
     assert res["type"] == "ARCHIVE_PAGE"
     mock_wa.send_message.assert_called_once()
     mock_tg.send_message.assert_called_once()
+
+
+def test_append_blocks_to_document_success():
+    mock_notion = MagicMock()
+    mock_client = MagicMock()
+    mock_notion.client = mock_client
+
+    with patch("app.workspace_service.find_page_node_in_workspace") as mock_find:
+        mock_find.return_value = WorkspacePageNode(
+            id="page-ideas",
+            title="Ideas for projects",
+            url="https://notion.so/ideas",
+            breadcrumb="Home > Notes > Ideas for projects",
+        )
+
+        res = append_blocks_to_document(
+            target_title_or_id="Ideas for projects",
+            content="Build AI voice agent for Notion",
+            block_type="bulleted_list_item",
+            notion_client=mock_notion,
+        )
+
+        assert res["status"] == "ok"
+        assert res["page_title"] == "Ideas for projects"
+        assert res["content_appended"] == "Build AI voice agent for Notion"
+        assert "Appended to Note" in res["reply_text"]
+        assert "Build AI voice agent for Notion" in res["reply_text"]
+        mock_notion._request_with_retry.assert_called_once()
+
+
+def test_append_blocks_to_document_not_found():
+    mock_notion = MagicMock()
+    mock_client = MagicMock()
+    mock_notion.client = mock_client
+
+    with patch("app.workspace_service.find_page_node_in_workspace") as mock_find:
+        mock_find.return_value = None
+
+        res = append_blocks_to_document(
+            target_title_or_id="Nonexistent document",
+            content="Some note",
+            notion_client=mock_notion,
+        )
+
+        assert res["status"] == "not_found"
+        assert "Could not locate document" in res["reply_text"]
+

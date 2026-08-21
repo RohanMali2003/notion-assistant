@@ -1,18 +1,51 @@
+import json
+import os
 import threading
 import time
 from typing import Any, Dict, List, Optional
 
+CACHE_FILE_PATH = os.path.join("data", "session_cache.json")
+
 
 class ConversationMemory:
-    """Thread-safe in-memory rolling conversational history and state tracker per sender."""
+    """Thread-safe persistent rolling conversational history and state tracker per sender."""
 
-    def __init__(self, max_history: int = 6, ttl_seconds: int = 1800):
+    def __init__(self, max_history: int = 6, ttl_seconds: int = 86400, cache_file: str = CACHE_FILE_PATH):
         self._lock = threading.Lock()
         self._history: Dict[str, List[Dict[str, Any]]] = {}
         self._query_state: Dict[str, Dict[str, Any]] = {}
         self._last_active: Dict[str, float] = {}
         self.max_history = max_history
         self.ttl_seconds = ttl_seconds
+        self.cache_file = cache_file
+
+        os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
+        self._load_disk_cache()
+
+    def _load_disk_cache(self) -> None:
+        """Load session history and state from disk file on startup."""
+        if not os.path.exists(self.cache_file):
+            return
+        try:
+            with open(self.cache_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                self._history = data.get("history", {})
+                self._query_state = data.get("query_state", {})
+                self._last_active = data.get("last_active", {})
+        except Exception:
+            pass
+
+    def _save_disk_cache(self) -> None:
+        """Save session history and state to disk file."""
+        try:
+            with open(self.cache_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "history": self._history,
+                    "query_state": self._query_state,
+                    "last_active": self._last_active,
+                }, f, ensure_ascii=False)
+        except Exception:
+            pass
 
     def _cleanup_expired(self, now: float) -> None:
         """Remove sessions inactive for longer than ttl_seconds."""
@@ -41,6 +74,7 @@ class ConversationMemory:
             })
             if len(self._history[sender_id]) > self.max_history:
                 self._history[sender_id] = self._history[sender_id][-self.max_history:]
+            self._save_disk_cache()
 
     def add_assistant_message(
         self,
@@ -66,6 +100,7 @@ class ConversationMemory:
             })
             if len(self._history[sender_id]) > self.max_history:
                 self._history[sender_id] = self._history[sender_id][-self.max_history:]
+            self._save_disk_cache()
 
     def get_history(self, sender_id: str, max_turns: int = 4) -> List[Dict[str, Any]]:
         with self._lock:
@@ -101,6 +136,49 @@ class ConversationMemory:
             if sender_id not in self._query_state:
                 self._query_state[sender_id] = {}
             self._query_state[sender_id].update(kwargs)
+
+    def set_last_query_results(self, sender_id: str, results: List[Dict[str, Any]]) -> None:
+        """Store the list of task dicts returned by the latest query for ordinal referencing."""
+        if not sender_id:
+            return
+        with self._lock:
+            if sender_id not in self._query_state:
+                self._query_state[sender_id] = {}
+            self._query_state[sender_id]["last_results"] = results
+            self._save_disk_cache()
+
+    def get_last_query_results(self, sender_id: str) -> List[Dict[str, Any]]:
+        """Retrieve stored task dicts from latest task query for sender."""
+        if not sender_id:
+            return []
+        with self._lock:
+            return list(self._query_state.get(sender_id, {}).get("last_results", []))
+
+    def set_pending_menu(self, sender_id: str, menu_payload: Dict[str, Any]) -> None:
+        """Store pending interactive selection menu options for ambiguous matching resolution."""
+        if not sender_id:
+            return
+        with self._lock:
+            if sender_id not in self._query_state:
+                self._query_state[sender_id] = {}
+            self._query_state[sender_id]["pending_menu"] = menu_payload
+            self._save_disk_cache()
+
+    def get_pending_menu(self, sender_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve active pending selection menu payload for sender if present."""
+        if not sender_id:
+            return None
+        with self._lock:
+            return self._query_state.get(sender_id, {}).get("pending_menu")
+
+    def clear_pending_menu(self, sender_id: str) -> None:
+        """Clear active pending menu payload for sender."""
+        if not sender_id:
+            return
+        with self._lock:
+            if sender_id in self._query_state:
+                self._query_state[sender_id].pop("pending_menu", None)
+                self._save_disk_cache()
 
     def clear(self, sender_id: Optional[str] = None) -> None:
         with self._lock:

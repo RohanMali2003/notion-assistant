@@ -6,17 +6,21 @@ from app.main import (
     analyze_user_text_two_stage,
     analyze_user_text_with_gemini,
     classify_module_stage1,
+    parse_document_append_stage2,
     parse_learning_stage2,
     parse_leetcode_stage2,
     parse_mind_stage2,
+    parse_task_action_stage2,
     parse_tasks_stage2,
 )
 from app.schemas import (
+    DocumentAppendAnalysis,
     LearningRequest,
     LeetcodeReviewRequest,
     MindEntry,
     ModuleClassification,
     ReminderItem,
+    TaskActionAnalysis,
     TaskAnalysis,
 )
 
@@ -1004,6 +1008,125 @@ def test_webhook_telegram_send_failure_logged_not_crashed(mock_genai_cls, mock_t
     )
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+# --- Ocean v3.0 Stage 2 & Webhook Tests ---
+
+@patch("app.main.genai.Client")
+def test_parse_task_action_stage2_success(mock_genai_cls):
+    mock_client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.parsed = TaskActionAnalysis(action="MARK_DONE", task_target_title="Berkshire Dining", new_status_name="Done")
+    mock_client.models.generate_content.return_value = mock_resp
+    mock_genai_cls.return_value = mock_client
+
+    res = parse_task_action_stage2("Mark Berkshire Dining as done")
+    assert res.action == "MARK_DONE"
+    assert res.task_target_title == "Berkshire Dining"
+    assert res.new_status_name == "Done"
+
+
+@patch("app.main.genai.Client")
+def test_parse_document_append_stage2_success(mock_genai_cls):
+    mock_client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.parsed = DocumentAppendAnalysis(
+        target_document_title="Ideas for projects",
+        content_to_append="Build AI voice agent for Notion",
+        block_type="bulleted_list_item",
+    )
+    mock_client.models.generate_content.return_value = mock_resp
+    mock_genai_cls.return_value = mock_client
+
+    res = parse_document_append_stage2("Add Build AI voice agent for Notion to my Ideas for projects note")
+    assert res.target_document_title == "Ideas for projects"
+    assert res.content_to_append == "Build AI voice agent for Notion"
+    assert res.block_type == "bulleted_list_item"
+
+
+@patch("app.main.execute_task_action")
+@patch("app.main.TelegramAssistantClient")
+@patch("app.main.genai.Client")
+def test_webhook_telegram_task_action_integration(mock_genai_cls, mock_tg_cls, mock_execute, env_setup):
+    mock_genai_inst = MagicMock()
+    stage1_resp = MagicMock()
+    stage1_resp.parsed = ModuleClassification(module="TASK_ACTION", raw_text="Mark Berkshire Dining done")
+
+    stage2_resp = MagicMock()
+    stage2_resp.parsed = TaskActionAnalysis(action="MARK_DONE", task_target_title="Berkshire Dining")
+    mock_genai_inst.models.generate_content.side_effect = [stage1_resp, stage2_resp]
+    mock_genai_cls.return_value = mock_genai_inst
+
+    mock_execute.return_value = {
+        "status": "ok",
+        "reply_text": "✅ Marked task as **Done**!\n📌 **[Berkshire Dining](https://notion.so/123)**",
+    }
+
+    mock_tg_inst = MagicMock()
+    mock_tg_cls.return_value = mock_tg_inst
+
+    from app.main import app
+    client = TestClient(app)
+    payload = {
+        "update_id": 10,
+        "message": {
+            "message_id": 20,
+            "text": "Mark Berkshire Dining done",
+            "chat": {"id": 8888}
+        }
+    }
+    response = client.post(
+        "/webhook/telegram",
+        json=payload,
+        headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    mock_execute.assert_called_once()
+    mock_tg_inst.send_message.assert_called_once()
+
+
+@patch("app.main.append_blocks_to_document")
+@patch("app.main.TelegramAssistantClient")
+@patch("app.main.genai.Client")
+def test_webhook_telegram_document_append_integration(mock_genai_cls, mock_tg_cls, mock_append, env_setup):
+    mock_genai_inst = MagicMock()
+    stage1_resp = MagicMock()
+    stage1_resp.parsed = ModuleClassification(module="DOCUMENT_APPEND", raw_text="Add idea to Ideas for projects")
+
+    stage2_resp = MagicMock()
+    stage2_resp.parsed = DocumentAppendAnalysis(target_document_title="Ideas for projects", content_to_append="Build AI agent")
+    mock_genai_inst.models.generate_content.side_effect = [stage1_resp, stage2_resp]
+    mock_genai_cls.return_value = mock_genai_inst
+
+    mock_append.return_value = {
+        "status": "ok",
+        "reply_text": "📝 *Appended to Note!*",
+    }
+
+    mock_tg_inst = MagicMock()
+    mock_tg_cls.return_value = mock_tg_inst
+
+    from app.main import app
+    client = TestClient(app)
+    payload = {
+        "update_id": 11,
+        "message": {
+            "message_id": 21,
+            "text": "Add idea to Ideas for projects",
+            "chat": {"id": 8888}
+        }
+    }
+    response = client.post(
+        "/webhook/telegram",
+        json=payload,
+        headers={"X-Telegram-Bot-Api-Secret-Token": "test_secret_123"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    mock_append.assert_called_once()
+    mock_tg_inst.send_message.assert_called_once()
+
 
 
 

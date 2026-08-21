@@ -716,6 +716,16 @@ def execute_leetcode_background_pipeline(
             notion_url = f"https://www.notion.so/{clean_id}"
         review_result.notion_page_url = notion_url
         logger.info("Logged LeetCode review to Notion (page_id=%s)", notion_page_id)
+        try:
+            from app.motion import evidence_ingestion_engine
+            evidence_ingestion_engine.ingest_leetcode_review(
+                problem_title=review_result.problem_title,
+                pattern_notes=review_result.review_summary or "",
+                page_url=notion_url,
+                duration_hours=1.0,
+            )
+        except Exception as err:
+            logger.debug("Motion evidence ingestion skipped: %s", err)
     except Exception as notion_exc:
         logger.warning("Could not log LeetCode review to Notion (%s). Continuing with notification.", notion_exc)
 

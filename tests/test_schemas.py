@@ -2,12 +2,17 @@ import pytest
 from pydantic import ValidationError
 from app.schemas import (
     AgentAction,
+    BatchTaskActionAnalysis,
+    DocumentAppendAnalysis,
     LearningRequest,
     LeetcodeReviewRequest,
+    MemoryGovernanceAnalysis,
     MindEntry,
     ModuleClassification,
     ModuleEnum,
     ReminderItem,
+    TaskActionAnalysis,
+    TaskActionType,
     TaskAnalysis,
     TelegramWebhookUpdate,
     WebhookResponse,
@@ -355,5 +360,63 @@ def test_telegram_update_schema():
     )
     assert update.update_id == 1001
     assert update.message["text"] == "/start"
+
+
+# --- Ocean v3.0 Schema Tests ---
+
+def test_task_action_analysis_schema():
+    action_data = TaskActionAnalysis(
+        action="MARK_DONE",
+        task_target_title="Berkshire Dining",
+        new_status_name="Done",
+        confidence=0.95,
+    )
+    assert action_data.action == TaskActionType.MARK_DONE
+    assert action_data.task_target_title == "Berkshire Dining"
+    assert action_data.new_status_name == "Done"
+    assert action_data.confidence == 0.95
+
+
+def test_task_action_reschedule_schema():
+    action_data = TaskActionAnalysis(
+        action="UPDATE_DUE_DATE",
+        task_target_title="Leetcode problem",
+        new_due_date_iso="2026-08-25",
+    )
+    assert action_data.action == "UPDATE_DUE_DATE"
+    assert action_data.new_due_date_iso == "2026-08-25"
+
+
+def test_document_append_analysis_schema():
+    append_data = DocumentAppendAnalysis(
+        target_document_title="Ideas for projects",
+        content_to_append="Build AI voice agent for Notion",
+        block_type="bulleted_list_item",
+    )
+    assert append_data.target_document_title == "Ideas for projects"
+    assert append_data.content_to_append == "Build AI voice agent for Notion"
+    assert append_data.block_type == "bulleted_list_item"
+
+
+# --- Ocean v3.1 Schema Tests ---
+
+def test_memory_governance_analysis_schema():
+    mem = MemoryGovernanceAnalysis(
+        command="FORGET",
+        target_entity="grad school application prep",
+    )
+    assert mem.command == "FORGET"
+    assert mem.target_entity == "grad school application prep"
+
+
+def test_batch_task_action_analysis_schema():
+    batch = BatchTaskActionAnalysis(
+        action="MARK_DONE",
+        tag_filter="UMass Admin",
+    )
+    assert batch.action == "MARK_DONE"
+    assert batch.tag_filter == "UMass Admin"
+
+
 
 

@@ -522,6 +522,17 @@ def execute_learning_background_pipeline(
         f"{one_line_summary}"
     )
 
+    try:
+        from app.motion import evidence_ingestion_engine
+        evidence_ingestion_engine.ingest_learning_milestone(
+            topic_title=subject_title,
+            summary=one_line_summary,
+            page_url=subject_url,
+            duration_hours=1.5,
+        )
+    except Exception as err:
+        logger.debug("Motion evidence ingestion skipped: %s", err)
+
     # Send completion message
     if to_phone:
         try:
