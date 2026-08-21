@@ -36,9 +36,10 @@ class ModuleClassification(BaseModel):
         "DIGEST",
         "MOTION",
         "ROLLBACK",
+        "COMPOUND",
     ] = Field(
         ...,
-        description="The target module: TASKS, TASK_ACTION, BATCH_TASK_ACTION, DOCUMENT_APPEND, MEMORY_CONTROL, MIND, LEARNING, LEETCODE, SEARCH, DIGEST, MOTION, or ROLLBACK."
+        description="The target module: TASKS, TASK_ACTION, BATCH_TASK_ACTION, DOCUMENT_APPEND, MEMORY_CONTROL, MIND, LEARNING, LEETCODE, SEARCH, DIGEST, MOTION, ROLLBACK, or COMPOUND."
     )
     raw_text: str = Field(
         default="",
