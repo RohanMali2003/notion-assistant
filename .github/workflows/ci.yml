@@ -1,0 +1,41 @@
+name: Continuous Integration & Automated Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Run Pytest Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Pytest Test Suite
+        env:
+          APP_ENV: test
+          NOTION_TOKEN: test_notion_token
+          NOTION_DATABASE_ID: test_db_id
+          TELEGRAM_BOT_TOKEN: test_bot_token
+          TELEGRAM_CHAT_ID: "12345678"
+          TELEGRAM_WEBHOOK_SECRET: test_secret_123
+          GEMINI_API_KEY: test_gemini_key
+          GOOGLE_API_KEY: test_gemini_key
+        run: |
+          pytest -k "not minilm" --maxfail=5 -v

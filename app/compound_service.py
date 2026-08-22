@@ -1,98 +1,147 @@
-﻿"""Compound Intent Execution Service for Ocean v3.2.
+"""Compound Intent Execution Service for Ocean v3.2.
 
 Executes a multi-step CompoundPlan produced by the COMPOUND module parser,
-dispatching each atomic action to the appropriate underlying service and
-collating results into a single reply.
+dispatching each atomic action to the appropriate canonical service (task_action,
+batch_task_action, workspace_ingest, task creation) and collating results into
+a single, unified summary reply.
 """
 
 import logging
 from typing import Any, Dict, List, Optional
 
 from app.notion_client import NotionAssistantClient
-from app.schemas import CompoundAction, CompoundActionType, CompoundPlan, WorkspaceEntryItem
-from app.task_action_service import (
+from app.schemas import (
+    BatchTaskActionAnalysis,
+    CompoundAction,
+    CompoundActionType,
+    CompoundPlan,
     TaskActionAnalysis,
-    execute_batch_set_priority,
-    execute_batch_task_action,
-    execute_set_priority,
-    execute_task_action,
+    WorkspaceEntryItem,
 )
-from app.schemas import BatchTaskActionAnalysis
+from app.task_action_service import execute_batch_task_action, execute_task_action
+from app.workspace_service import add_entries_to_workspace_target
 
 logger = logging.getLogger("notion-assistant.compound_service")
 
 
-def _execute_batch_delete(step: CompoundAction, notion_client: NotionAssistantClient) -> str:
-    analysis = BatchTaskActionAnalysis(
-        action="DELETE_TASK",
-        target_query=step.target_query or "",
-    )
-    res = execute_batch_task_action(analysis, notion_client=notion_client)
-    count = res.get("count", 0)
-    query = step.target_query or "matching"
-    if count == 0:
-        return f"No tasks found matching '{query}' to archive."
-    return f"Archived {count} task(s) matching '{query}'."
+def _dispatch_atomic_step(
+    step: CompoundAction,
+    notion: NotionAssistantClient,
+    sender_id: Optional[str] = None,
+) -> str:
+    """Dispatch an atomic CompoundAction directly to its canonical module handler."""
+    action = step.action_type
 
+    # --- 1. Single Task Actions (1-to-1) ---
+    if action in (CompoundActionType.ARCHIVE_TASK, "ARCHIVE_TASK", "DELETE_TASK"):
+        analysis = TaskActionAnalysis(
+            action="DELETE_TASK",
+            task_target_title=step.target_title or "",
+        )
+        res = execute_task_action(analysis, notion_client=notion, user_id=sender_id)
+        title = res.get("task_title") or step.target_title or "task"
+        if res.get("status") == "ok":
+            return f"🗑️ Archived '{title}'."
+        return f"❓ Could not find task matching '{step.target_title}' to archive."
 
-def _execute_archive_task(step: CompoundAction, notion_client: NotionAssistantClient, user_id: Optional[str]) -> str:
-    analysis = TaskActionAnalysis(
-        action="DELETE_TASK",
-        task_target_title=step.target_title or "",
-    )
-    res = execute_task_action(analysis, notion_client=notion_client, user_id=user_id)
-    title = res.get("task_title") or step.target_title or "task"
-    if res.get("status") == "ok":
-        return f"Archived '{title}'."
-    return res.get("reply_text") or f"Could not archive '{title}'."
+    elif action in (CompoundActionType.TASK_SET_PRIO, "TASK_SET_PRIO", "SET_PRIORITY"):
+        prio = step.priority or "Medium"
+        analysis = TaskActionAnalysis(
+            action="SET_PRIORITY",
+            task_target_title=step.target_title or "",
+            new_priority=prio,  # type: ignore[arg-type]
+        )
+        res = execute_task_action(analysis, notion_client=notion, user_id=sender_id)
+        title = res.get("task_title") or step.target_title or "task"
+        emoji = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(prio, "⚡")
+        if res.get("status") == "ok":
+            return f"{emoji} Set '{title}' to {prio} priority."
+        return f"❓ Could not find task matching '{step.target_title}' to set priority."
 
+    elif action in (CompoundActionType.MARK_DONE, "MARK_DONE"):
+        analysis = TaskActionAnalysis(
+            action="MARK_DONE",
+            task_target_title=step.target_title or "",
+        )
+        res = execute_task_action(analysis, notion_client=notion, user_id=sender_id)
+        title = res.get("task_title") or step.target_title or "task"
+        if res.get("status") == "ok":
+            return f"✅ Marked '{title}' as Done."
+        return f"❓ Could not find task matching '{step.target_title}' to complete."
 
-def _execute_task_set_prio(step: CompoundAction, notion_client: NotionAssistantClient, user_id: Optional[str]) -> str:
-    res = execute_set_priority(
-        task_query=step.target_title or "",
-        priority=step.priority or "Medium",
-        notion_client=notion_client,
-        user_id=user_id,
-    )
-    priority_emoji = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(step.priority or "", "⚡")
-    title = res.get("task_title") or step.target_title or "task"
-    if res.get("status") == "ok":
-        return f"{priority_emoji} Set '{title}' to {step.priority} priority."
-    return res.get("reply_text") or f"Could not set priority on '{title}'."
+    # --- 2. Batch Task Actions (1-to-Many) ---
+    elif action in (CompoundActionType.BATCH_DELETE, "BATCH_DELETE"):
+        query = step.target_query or "matching tasks"
+        analysis = BatchTaskActionAnalysis(
+            action="DELETE_TASK",
+            target_query=step.target_query or "",
+        )
+        res = execute_batch_task_action(analysis, notion_client=notion, user_id=sender_id)
+        count = res.get("count", 0)
+        if count == 0:
+            return f"⚠️ No active tasks found matching '{query}' to archive."
+        return f"🗑️ Archived {count} task(s) matching '{query}'."
 
+    elif action in (CompoundActionType.BATCH_SET_PRIO, "BATCH_SET_PRIO"):
+        query = step.target_query or "matching tasks"
+        prio = step.priority or "Medium"
+        emoji = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(prio, "⚡")
+        analysis = BatchTaskActionAnalysis(
+            action="SET_PRIORITY",
+            target_query=step.target_query or "",
+            new_priority=prio,  # type: ignore[arg-type]
+        )
+        res = execute_batch_task_action(analysis, notion_client=notion, user_id=sender_id)
+        count = res.get("count", 0)
+        if count == 0:
+            return f"⚠️ No active tasks found matching '{query}' for priority update."
+        return f"{emoji} Set {count} task(s) matching '{query}' to {prio} priority."
 
-def _execute_batch_set_prio(step: CompoundAction, notion_client: NotionAssistantClient) -> str:
-    res = execute_batch_set_priority(
-        target_query=step.target_query or "",
-        priority=step.priority or "Medium",
-        notion_client=notion_client,
-    )
-    priority_emoji = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(step.priority or "", "⚡")
-    count = res.get("count", 0)
-    query = step.target_query or "matching tasks"
-    if count == 0:
-        return f"No tasks matched '{query}' for priority update."
-    return f"{priority_emoji} Set {count} task(s) matching '{query}' to {step.priority} priority."
+    elif action in (CompoundActionType.BATCH_MARK_DONE, "BATCH_MARK_DONE"):
+        query = step.target_query or "matching tasks"
+        analysis = BatchTaskActionAnalysis(
+            action="MARK_DONE",
+            target_query=step.target_query or "",
+        )
+        res = execute_batch_task_action(analysis, notion_client=notion, user_id=sender_id)
+        count = res.get("count", 0)
+        if count == 0:
+            return f"⚠️ No active tasks found matching '{query}' to complete."
+        return f"✅ Marked {count} task(s) matching '{query}' as Done."
 
+    # --- 3. Workspace Ingestion / Append ---
+    elif action in (CompoundActionType.MOVE_TO_LIST, "MOVE_TO_LIST", "DOCUMENT_APPEND"):
+        target = step.dest_target or "Reading List"
+        if not step.items:
+            return f"⚠️ No items specified to add to '{target}'."
+        workspace_items = [WorkspaceEntryItem(title=item) for item in step.items]
+        res = add_entries_to_workspace_target(
+            target_query=target,
+            items=workspace_items,
+            notion_client=notion,
+            sender_id=sender_id,
+        )
+        count = len(step.items)
+        if res.get("status") in ("ok", "partial"):
+            titles = ", ".join(f"'{i}'" for i in step.items[:3])
+            suffix = f" + {count - 3} more" if count > 3 else ""
+            return f"📚 Added {titles}{suffix} to {target}."
+        return res.get("reply_text") or f"⚠️ Could not add items to '{target}'."
 
-def _execute_move_to_list(step: CompoundAction, notion_client: NotionAssistantClient, sender_id: Optional[str]) -> str:
-    from app.workspace_service import add_entries_to_workspace_target
-    if not step.items:
-        return f"No items specified to move to '{step.dest_target}'."
-    workspace_items = [WorkspaceEntryItem(title=item) for item in step.items]
-    res = add_entries_to_workspace_target(
-        target_query=step.dest_target or "Reading List",
-        items=workspace_items,
-        notion_client=notion_client,
-        sender_id=sender_id,
-    )
-    count = len(step.items)
-    target = step.dest_target or "Reading List"
-    if res.get("status") in ("ok", "partial"):
-        titles = ", ".join(f"'{i}'" for i in step.items[:3])
-        suffix = f" + {count - 3} more" if count > 3 else ""
-        return f"📚 Added {titles}{suffix} to {target}."
-    return res.get("reply_text") or f"Could not add items to '{target}'."
+    # --- 4. Create Task ---
+    elif action in (CompoundActionType.CREATE_TASK, "CREATE_TASK"):
+        title = step.target_title or "New Task"
+        created = notion.create_task(
+            title=title,
+            priority=step.priority,
+            due_date=step.due_date,
+        )
+        if created:
+            return f"📌 Created task '{title}'."
+        return f"⚠️ Could not create task '{title}'."
+
+    else:
+        return f"❓ Unsupported compound action: {action}"
 
 
 def execute_compound_plan(
@@ -100,7 +149,7 @@ def execute_compound_plan(
     notion_client: Optional[NotionAssistantClient] = None,
     sender_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Execute each CompoundAction step sequentially and collate results."""
+    """Execute each CompoundAction step sequentially via canonical handlers and collate results."""
     notion = notion_client or NotionAssistantClient()
     if notion.client is None:
         return {"status": "error", "reply_text": "❌ Notion integration is not configured or connected."}
@@ -112,21 +161,9 @@ def execute_compound_plan(
 
     for i, step in enumerate(plan.steps, start=1):
         try:
-            action = step.action_type
-            if action == CompoundActionType.BATCH_DELETE:
-                result = _execute_batch_delete(step, notion)
-            elif action == CompoundActionType.ARCHIVE_TASK:
-                result = _execute_archive_task(step, notion, sender_id)
-            elif action == CompoundActionType.TASK_SET_PRIO:
-                result = _execute_task_set_prio(step, notion, sender_id)
-            elif action == CompoundActionType.BATCH_SET_PRIO:
-                result = _execute_batch_set_prio(step, notion)
-            elif action == CompoundActionType.MOVE_TO_LIST:
-                result = _execute_move_to_list(step, notion, sender_id)
-            else:
-                result = f"Unknown action type: {action}"
+            result = _dispatch_atomic_step(step, notion=notion, sender_id=sender_id)
             step_results.append(f"{i}. {result}")
-            logger.info("Compound step %d/%d (%s): %s", i, total, action, result)
+            logger.info("Compound step %d/%d (%s): %s", i, total, step.action_type, result)
         except Exception as exc:
             logger.error("Compound step %d/%d (%s) failed: %s", i, total, step.action_type, exc, exc_info=True)
             step_results.append(f"{i}. ❌ Step failed: {exc}")

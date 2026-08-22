@@ -877,66 +877,22 @@ def add_entries_to_workspace_target(
 
     affected_items = []
 
-    # CASE A: TARGET IS A DATABASE (e.g. Reading List)
+    # CASE A: TARGET IS A DATABASE (e.g. Reading List, Project Ideas, etc.)
     if database_id:
         try:
-            db_meta = notion._request_with_retry(
-                notion.client.databases.retrieve,
-                database_id=database_id,
-            )
-            db_props = db_meta.get("properties", {})
-
-            # Identify Title property name
-            title_prop = "Title"
-            for k, v in db_props.items():
-                if v.get("type") == "title":
-                    title_prop = k
-                    break
-
-            # Identify Status property name and valid options
-            status_prop = None
-            valid_statuses = []
-            for k, v in db_props.items():
-                if v.get("type") == "status":
-                    status_prop = k
-                    for opt in v.get("status", {}).get("options", []):
-                        valid_statuses.append(opt.get("name"))
-                    break
-                elif v.get("type") == "select" and "status" in k.lower():
-                    status_prop = k
-                    for opt in v.get("select", {}).get("options", []):
-                        valid_statuses.append(opt.get("name"))
-                    break
-
-            author_prop = next((k for k in db_props if "author" in k.lower()), None)
-            summary_prop = next((k for k in db_props if "summary" in k.lower() or "note" in k.lower() or "detail" in k.lower()), None)
+            from app.notion_schema_engine import schema_engine
+            schema = schema_engine.get_schema(database_id=database_id, notion_client=notion)
 
             for item in items:
-                props_payload: Dict[str, Any] = {
-                    title_prop: {
-                        "title": [{"type": "text", "text": {"content": item.title}}]
-                    }
-                }
+                item_dict = item.model_dump() if hasattr(item, "model_dump") else (item if isinstance(item, dict) else getattr(item, "__dict__", {}))
 
-                if status_prop:
-                    chosen_status = item.status or default_status or "Want to Read"
-                    matched_opt = next((opt for opt in valid_statuses if opt.lower() == chosen_status.lower()), None)
-                    if not matched_opt and valid_statuses:
-                        matched_opt = next((opt for opt in valid_statuses if "want" in opt.lower()), valid_statuses[0])
-                    final_status_val = matched_opt or chosen_status
-                    if db_props[status_prop].get("type") == "status":
-                        props_payload[status_prop] = {"status": {"name": final_status_val}}
-                    else:
-                        props_payload[status_prop] = {"select": {"name": final_status_val}}
-
-                if author_prop and item.author:
-                    props_payload[author_prop] = {
-                        "rich_text": [{"type": "text", "text": {"content": item.author}}]
-                    }
-
-                if summary_prop and item.details:
-                    props_payload[summary_prop] = {
-                        "rich_text": [{"type": "text", "text": {"content": item.details}}]
+                if schema:
+                    props_payload = schema.build_page_properties(item_dict, default_status=default_status or "Want to Read")
+                else:
+                    props_payload = {
+                        "Name": {
+                            "title": [{"type": "text", "text": {"content": item.title}}]
+                        }
                     }
 
                 created_page = notion._request_with_retry(
@@ -946,17 +902,12 @@ def add_entries_to_workspace_target(
                 )
                 page_id = created_page.get("id", "")
                 page_url = _extract_page_url(created_page)
-                item_status = None
-                if status_prop and status_prop in props_payload:
-                    val = props_payload[status_prop]
-                    item_status = val.get("status", {}).get("name") or val.get("select", {}).get("name")
 
                 affected_items.append({
                     "id": page_id,
                     "title": item.title,
                     "url": page_url,
                     "type": "database_row",
-                    "status": item_status,
                 })
 
             if sender_id:

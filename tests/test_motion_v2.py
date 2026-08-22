@@ -168,7 +168,7 @@ def test_multi_window_synthesis(test_motion_v2_env):
             duration_hours=1.0,
         )
 
-    observations, conclusions = synthesis.run_synthesis(reference_date="2026-08-21", save_records=True)
+    observations, conclusions = synthesis.run_synthesis(save_records=True)
 
     assert len(observations) > 0
     assert len(conclusions) > 0
@@ -202,7 +202,7 @@ def test_strategic_drift_evaluation(test_motion_v2_env):
             duration_hours=1.0,
         )
 
-    report_a = drift.evaluate_drift(window_days=7, reference_date="2026-08-21", save_report=True)
+    report_a = drift.evaluate_drift(window_days=7, save_report=True)
     assert report_a.alignment_score >= 80.0
     assert report_a.drift_severity == DriftSeverity.NORMAL
     assert len(report_a.neglected_initiatives) == 0
@@ -225,7 +225,7 @@ def test_strategic_drift_evaluation(test_motion_v2_env):
             )
         )
 
-    report_b = drift.evaluate_drift(window_days=7, reference_date="2026-08-21", save_report=True)
+    report_b = drift.evaluate_drift(window_days=7, save_report=True)
     assert report_b.alignment_score < 70.0
     assert report_b.drift_severity in (DriftSeverity.LOW_DRIFT, DriftSeverity.MODERATE_DRIFT, DriftSeverity.CRITICAL_DRIFT)
     assert len(report_b.neglected_initiatives) >= 1
@@ -248,7 +248,7 @@ def test_multi_hop_attribution(test_motion_v2_env):
     )
 
     # 2. Run synthesis
-    observations, conclusions = synthesis.run_synthesis(reference_date="2026-08-21", save_records=True)
+    observations, conclusions = synthesis.run_synthesis(save_records=True)
     assert len(conclusions) > 0
 
     # 3. Create a Decision Journal entry linked to conclusion

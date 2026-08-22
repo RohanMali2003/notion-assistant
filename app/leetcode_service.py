@@ -7,8 +7,11 @@ import httpx
 
 try:
     from google import genai
-except ImportError:
-    genai = None
+except (ImportError, AttributeError):
+    class _MockGenaiModule:
+        class Client:
+            pass
+    genai = _MockGenaiModule()
 
 from app.ai import DEFAULT_GEMINI_MODEL, generate_text, get_gemini_client, get_genai_types
 from app.config import settings

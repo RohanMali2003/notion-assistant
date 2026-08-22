@@ -398,6 +398,7 @@ def execute_batch_task_action(
     batch_analysis: BatchTaskActionAnalysis,
     notion_client: Optional[NotionAssistantClient] = None,
     reference_dt: Optional[datetime] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute batch task action across multiple active tasks (e.g. mark all UMass tasks as done)."""
     notion = notion_client or NotionAssistantClient()
@@ -409,73 +410,93 @@ def execute_batch_task_action(
             "reply_text": "❌ Notion integration is not configured or connected.",
         }
 
-    # Query matching tasks — use high limit to ensure all tasks are fetched
-    pending_tasks = notion.get_pending(
-        limit=200,
-        priority=batch_analysis.priority_filter,
-        tag=batch_analysis.tag_filter,
+    # Query candidate tasks — fetch high limit so full workspace active tasks are scanned
+    all_pending = notion.get_pending(limit=200)
+
+    # Use entity_resolver.filter_candidates to robustly match query, tags, and priority
+    pending_tasks = entity_resolver.filter_candidates(
+        query=batch_analysis.target_query or "",
+        candidates=all_pending,
+        key_fn=lambda t: t.get("title", ""),
+        tag_filter=batch_analysis.tag_filter,
+        priority_filter=batch_analysis.priority_filter,
     )
 
-    raw_query = (batch_analysis.target_query or "").strip()
-    if raw_query:
-        # Normalize: match both '&' and 'and' variants so LLM phrasing doesn't matter
-        query_lower = raw_query.lower()
-        query_amp = query_lower.replace(" and ", " & ")   # "read and annotate" -> "read & annotate"
-        query_and = query_lower.replace(" & ", " and ")   # "read & annotate" -> "read and annotate"
-        pending_tasks = [
-            t for t in pending_tasks
-            if any(
-                variant in t.get("title", "").lower()
-                for variant in (query_lower, query_amp, query_and)
-            )
-        ]
-
     if not pending_tasks:
+        q_label = batch_analysis.target_query or batch_analysis.tag_filter or "criteria"
         return {
             "status": "not_found",
             "count": 0,
-            "reply_text": "🎉 No matching active tasks found for batch update.",
+            "reply_text": f"🎉 No matching active tasks found for *'{q_label}'*.",
         }
 
     action_type = batch_analysis.action
     updated_titles = []
+    affected_items = []
+    previous_states = []
 
     for task in pending_tasks:
         p_id = task.get("page_id")
         t_title = task.get("title", "Untitled")
+        t_url = task.get("url", f"https://notion.so/{str(p_id).replace('-', '')}" if p_id else "#")
         try:
-            if action_type == TaskActionType.MARK_DONE:
+            if action_type in (TaskActionType.MARK_DONE, "MARK_DONE"):
                 status_name = batch_analysis.new_status_name or "Done"
                 notion.client.pages.update(page_id=p_id, properties={"Status": {"status": {"name": status_name}}})
-            elif action_type == TaskActionType.MARK_IN_PROGRESS:
+                previous_states.append({"page_id": p_id, "previous_status": task.get("status", "Not started")})
+            elif action_type in (TaskActionType.MARK_IN_PROGRESS, "MARK_IN_PROGRESS"):
                 status_name = batch_analysis.new_status_name or "In progress"
                 notion.client.pages.update(page_id=p_id, properties={"Status": {"status": {"name": status_name}}})
-            elif action_type == TaskActionType.UPDATE_DUE_DATE:
+                previous_states.append({"page_id": p_id, "previous_status": task.get("status", "Not started")})
+            elif action_type in (TaskActionType.UPDATE_DUE_DATE, "UPDATE_DUE_DATE"):
                 raw_date = batch_analysis.new_due_date_iso or ""
                 resolved_date = resolve_relative_date_string(raw_date, reference_dt=reference_dt) or raw_date
                 if resolved_date:
                     notion.client.pages.update(page_id=p_id, properties={"Due Date": {"date": {"start": resolved_date}}})
-            elif action_type == TaskActionType.DELETE_TASK:
+                    previous_states.append({"page_id": p_id, "previous_due_date": task.get("due_date")})
+            elif action_type in (TaskActionType.DELETE_TASK, "DELETE_TASK"):
                 notion.client.pages.update(page_id=p_id, archived=True)
+                previous_states.append({"page_id": p_id, "archived": True})
+            elif action_type in (TaskActionType.SET_PRIORITY, "SET_PRIORITY"):
+                prio = batch_analysis.new_priority or "Medium"
+                notion.client.pages.update(page_id=p_id, properties={"Priority": {"select": {"name": prio}}})
+                previous_states.append({"page_id": p_id, "previous_priority": task.get("priority")})
 
             updated_titles.append(t_title)
+            if p_id:
+                affected_items.append({"id": p_id, "title": t_title, "url": t_url, "type": "task"})
         except Exception as exc:
             logger.warning("Batch action item update failed for page %s: %s", p_id, exc)
 
     count = len(updated_titles)
-    action_label = action_type.value.replace("_", " ").title()
+    action_val = action_type.value if hasattr(action_type, "value") else str(action_type)
+    action_label = action_val.replace("_", " ").title()
+
+    if user_id and affected_items:
+        conversation_memory.record_mutation(
+            sender_id=user_id,
+            action_type="BATCH_TASK_ACTION",
+            target_title=batch_analysis.target_query or action_label,
+            affected_items=affected_items,
+            rollback_data={"action": action_val, "previous_states": previous_states},
+            summary=f"Batch {action_label} on {count} task(s)",
+        )
+
     reply = (
         f"⚡ *Batch Task Action Completed!*\n\n"
         f"🎯 Action: **{action_label}**\n"
         f"📊 Updated **{count}** task(s):\n"
         + "\n".join(f"• {t}" for t in updated_titles[:10])
     )
+    if count > 10:
+        reply += f"\n*...and {count - 10} more*"
 
     return {
         "status": "ok",
-        "action": action_type.value,
+        "action": action_val,
         "count": count,
         "updated_titles": updated_titles,
+        "affected_items": affected_items,
         "reply_text": reply,
     }
 
@@ -502,52 +523,17 @@ def execute_batch_set_priority(
     target_query: str,
     priority: str,
     notion_client: Optional[NotionAssistantClient] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Set priority on all pending tasks whose title contains target_query.
-
-    Used by the compound service to execute BATCH_SET_PRIO steps.
-    """
-    notion = notion_client or NotionAssistantClient()
-    if notion.client is None:
-        return {"status": "error", "reply_text": "❌ Notion not connected.", "count": 0}
-
-    pending = notion.get_pending(limit=200)
-    raw_q = target_query.strip()
-    if raw_q:
-        q_lower = raw_q.lower()
-        q_amp = q_lower.replace(" and ", " & ")
-        q_and = q_lower.replace(" & ", " and ")
-        matched = [
-            t for t in pending
-            if any(v in t.get("title", "").lower() for v in (q_lower, q_amp, q_and))
-        ]
-    else:
-        matched = pending
-
-    if not matched:
-        return {
-            "status": "not_found",
-            "count": 0,
-            "reply_text": f"⚠️ No pending tasks found matching *'{target_query}'* to set priority.",
-        }
-
-    updated = []
-    for task in matched:
-        p_id = task.get("page_id")
-        try:
-            notion.client.pages.update(
-                page_id=p_id,
-                properties={"Priority": {"select": {"name": priority}}},
-            )
-            updated.append(task.get("title", "Untitled"))
-        except Exception as exc:
-            logger.warning("Batch set priority failed for page %s: %s", p_id, exc)
-
-    count = len(updated)
+    """Set priority on all pending tasks matching target_query using EntityResolver filter."""
+    analysis = BatchTaskActionAnalysis(
+        action="SET_PRIORITY",
+        target_query=target_query,
+        new_priority=priority,  # type: ignore[arg-type]
+    )
+    res = execute_batch_task_action(analysis, notion_client=notion_client, user_id=user_id)
+    count = res.get("count", 0)
     priority_emoji = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(priority, "⚡")
-    return {
-        "status": "ok",
-        "count": count,
-        "updated_titles": updated,
-        "reply_text": f"{priority_emoji} Set **{count}** task(s) to *{priority}* priority.",
-    }
+    if res.get("status") == "ok":
+        res["reply_text"] = f"{priority_emoji} Set **{count}** task(s) matching *'{target_query}'* to *{priority}* priority."
+    return res

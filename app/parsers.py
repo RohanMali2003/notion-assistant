@@ -329,13 +329,16 @@ def parse_search_stage2(text: str, context: Optional[str] = None) -> SearchQuery
 
 STAGE2_COMPOUND_INSTRUCTION = (
     "Extract a multi-step compound plan from the user's message. The user has given multiple distinct task-management instructions in one message.\n"
-    "Return a CompoundPlan with a 'steps' list. Each step must have:\n"
-    "- action_type: One of BATCH_DELETE, ARCHIVE_TASK, TASK_SET_PRIO, BATCH_SET_PRIO, MOVE_TO_LIST.\n"
-    "- BATCH_DELETE: Archive all tasks matching a keyword pattern (set target_query to the keyword like 'Read & Annotate').\n"
+    "Return a CompoundPlan with a 'steps' list. Resolve pronouns and coreferences so each step is self-contained:\n"
+    "- action_type: One of BATCH_DELETE, ARCHIVE_TASK, TASK_SET_PRIO, BATCH_SET_PRIO, MOVE_TO_LIST, MARK_DONE, BATCH_MARK_DONE, CREATE_TASK.\n"
+    "- BATCH_DELETE: Archive all tasks matching a keyword pattern or tag (set target_query to the pattern like 'Read & Annotate').\n"
     "- ARCHIVE_TASK: Archive a single named task (set target_title to the task name).\n"
     "- TASK_SET_PRIO: Set priority on a single named task (set target_title and priority: High/Medium/Low).\n"
     "- BATCH_SET_PRIO: Set priority on multiple tasks matching a keyword (set target_query and priority: High/Medium/Low).\n"
-    "- MOVE_TO_LIST: Add items to a workspace list/database (set dest_target e.g. 'Reading List' and items list of titles).\n"
+    "- MOVE_TO_LIST: Add items to a workspace list/database (set dest_target e.g. 'Reading List', 'Notes', 'Ideas for projects' and items list of titles).\n"
+    "- MARK_DONE: Mark a single named task done (set target_title).\n"
+    "- BATCH_MARK_DONE: Mark all tasks matching a keyword/tag done (set target_query).\n"
+    "- CREATE_TASK: Create a new task (set target_title, optional priority, optional due_date).\n"
     "Order steps logically. Extract all distinct actions mentioned in the message."
 )
 

@@ -468,25 +468,11 @@ def execute_learning_background_pipeline(
                 failed_resources.append((v_res.name, short_err))
                 logger.warning("Failed to create resource row for '%s': %s", v_res.name, res_err)
 
-    # Step 3c: Create starter tasks in NOTION_TASKS_DB_ID with Tags=['Learning']
-    total_tasks = len(synthesis.starter_tasks)
-    successful_tasks = 0
-    failed_tasks: List[Tuple[str, str]] = []
-
-    for task_title in synthesis.starter_tasks:
-        try:
-            notion.create_starter_task(
-                title=task_title,
-                subject_page_id=subject_page_id,
-            )
-            successful_tasks += 1
-        except Exception as task_err:
-            err_str = str(task_err)
-            short_err = "rate limited" if "429" in err_str or "rate" in err_str.lower() else "write error"
-            failed_tasks.append((task_title, short_err))
-            logger.warning("Failed to create starter task '%s': %s", task_title, task_err)
+    # Step 3c: Starter tasks are maintained strictly as checklist (to_do) items on the Subject page (Step 3a)
+    # to avoid bloating the main Tasks database.
 
     # Step 4: Construct Completion Message
+    checklist_count = len(synthesis.starter_tasks)
     summary_parts = ["Subject created"]
 
     if total_resources > 0:
@@ -500,11 +486,8 @@ def execute_learning_background_pipeline(
     elif dropped_links_count > 0:
         summary_parts.append(f"0 resources logged ({dropped_links_count} invalid links dropped)")
 
-    if total_tasks > 0:
-        if failed_tasks:
-            summary_parts.append(f"{successful_tasks}/{total_tasks} starter tasks added ({len(failed_tasks)} failed)")
-        else:
-            summary_parts.append(f"{successful_tasks} starter tasks added")
+    if checklist_count > 0:
+        summary_parts.append(f"{checklist_count} starter checklist items added to subject page")
 
     one_line_summary = ", ".join(summary_parts) + "."
 
@@ -535,7 +518,6 @@ def execute_learning_background_pipeline(
         telegram_client=telegram,
     )
 
-
     return {
         "status": "ok",
         "subject_title": subject_title,
@@ -543,7 +525,6 @@ def execute_learning_background_pipeline(
         "subject_url": subject_url,
         "resources_logged": successful_resources,
         "resources_failed": len(failed_resources),
-        "tasks_added": successful_tasks,
-        "tasks_failed": len(failed_tasks),
+        "checklist_items": checklist_count,
         "summary": one_line_summary,
     }

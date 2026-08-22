@@ -506,7 +506,7 @@ class MemoryGovernanceAnalysis(BaseModel):
 
 class BatchTaskActionAnalysis(BaseModel):
     """Structured output schema for BATCH_TASK_ACTION module (multi-task actions across tags, priorities, or queries)."""
-    action: Literal["MARK_DONE", "MARK_IN_PROGRESS", "UPDATE_DUE_DATE", "DELETE_TASK"] = Field(
+    action: Literal["MARK_DONE", "MARK_IN_PROGRESS", "UPDATE_DUE_DATE", "DELETE_TASK", "SET_PRIORITY"] = Field(
         ...,
         description="The action type to perform across matching tasks."
     )
@@ -530,16 +530,23 @@ class BatchTaskActionAnalysis(BaseModel):
         default=None,
         description="New status name to set."
     )
+    new_priority: Optional[Literal["High", "Medium", "Low"]] = Field(
+        default=None,
+        description="New priority to set (High/Medium/Low) if action is SET_PRIORITY."
+    )
 
 # --- Ocean v3.2: Compound Multi-Intent Schemas ---
 
 class CompoundActionType(str, Enum):
     """Atomic action types that can be composed inside a CompoundPlan."""
-    BATCH_DELETE   = "BATCH_DELETE"    # Archive all tasks whose title contains target_query
-    ARCHIVE_TASK   = "ARCHIVE_TASK"    # Archive a single named task
-    TASK_SET_PRIO  = "TASK_SET_PRIO"   # Set priority on a single named task
-    BATCH_SET_PRIO = "BATCH_SET_PRIO"  # Set priority on all tasks matching target_query
-    MOVE_TO_LIST   = "MOVE_TO_LIST"    # Add items to a workspace target (e.g. Reading List)
+    BATCH_DELETE    = "BATCH_DELETE"     # Archive all tasks matching target_query
+    ARCHIVE_TASK    = "ARCHIVE_TASK"     # Archive a single named task
+    TASK_SET_PRIO   = "TASK_SET_PRIO"    # Set priority on a single named task
+    BATCH_SET_PRIO  = "BATCH_SET_PRIO"   # Set priority on all tasks matching target_query
+    MOVE_TO_LIST    = "MOVE_TO_LIST"     # Add items to a workspace target (e.g. Reading List)
+    MARK_DONE       = "MARK_DONE"        # Mark single task done
+    BATCH_MARK_DONE = "BATCH_MARK_DONE"  # Mark multiple tasks done
+    CREATE_TASK     = "CREATE_TASK"      # Create a new task
 
 
 class CompoundAction(BaseModel):
@@ -550,11 +557,11 @@ class CompoundAction(BaseModel):
     )
     target_title: Optional[str] = Field(
         default=None,
-        description="Exact or approximate title of a single target task (for ARCHIVE_TASK, TASK_SET_PRIO)."
+        description="Exact or approximate title of a single target task (for ARCHIVE_TASK, TASK_SET_PRIO, MARK_DONE, CREATE_TASK)."
     )
     target_query: Optional[str] = Field(
         default=None,
-        description="Keyword substring to match multiple tasks (for BATCH_DELETE, BATCH_SET_PRIO)."
+        description="Keyword or tag to match multiple tasks (for BATCH_DELETE, BATCH_SET_PRIO, BATCH_MARK_DONE)."
     )
     priority: Optional[Literal["High", "Medium", "Low"]] = Field(
         default=None,
@@ -562,11 +569,15 @@ class CompoundAction(BaseModel):
     )
     dest_target: Optional[str] = Field(
         default=None,
-        description="Destination workspace page or database title (e.g. 'Reading List'). Required for MOVE_TO_LIST."
+        description="Destination workspace page or database title (e.g. 'Reading List', 'Notes'). Required for MOVE_TO_LIST."
     )
     items: List[str] = Field(
         default_factory=list,
         description="List of item titles to move/add. Required for MOVE_TO_LIST."
+    )
+    due_date: Optional[str] = Field(
+        default=None,
+        description="Optional due date in YYYY-MM-DD format if creating or updating task."
     )
 
 

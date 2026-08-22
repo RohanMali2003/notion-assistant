@@ -16,9 +16,16 @@ from starlette.concurrency import run_in_threadpool
 try:
     from google import genai
     from google.genai import types
-except ImportError:
-    genai = None
-    types = None
+except (ImportError, AttributeError):
+    class _MockGenaiModule:
+        class Client:
+            pass
+    class _MockTypesModule:
+        class GenerateContentConfig:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+    genai = _MockGenaiModule()
+    types = _MockTypesModule()
 
 from app.ai import get_gemini_client, get_gemini_model
 from app.config import settings

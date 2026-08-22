@@ -35,8 +35,26 @@ def get_genai_types():
         return None
 
 
+_CLIENT_OVERRIDE: Optional[Any] = None
+
+
+def set_gemini_client_override(client: Optional[Any]) -> None:
+    """Set explicit Gemini client instance override for testing or custom configuration."""
+    global _CLIENT_OVERRIDE
+    _CLIENT_OVERRIDE = client
+
+
+def reset_gemini_client_override() -> None:
+    """Reset Gemini client instance override."""
+    global _CLIENT_OVERRIDE
+    _CLIENT_OVERRIDE = None
+
+
 def get_gemini_client():
     """Create and return a google-genai Client instance with configured API keys."""
+    if _CLIENT_OVERRIDE is not None:
+        return _CLIENT_OVERRIDE
+
     import sys
     for mod_name in ("app.leetcode_service", "app.workspace_service", "app.learning_service", "app.weekly_digest_service", "app.main"):
         mod = sys.modules.get(mod_name)

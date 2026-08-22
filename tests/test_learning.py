@@ -143,7 +143,6 @@ def test_execute_learning_background_pipeline_all_success(mock_compile, mock_ver
         "url": "https://notion.so/subj-page-123",
     }
     mock_notion.create_resource_row.return_value = {"id": "res-1"}
-    mock_notion.create_starter_task.return_value = {"id": "task-1"}
 
     mock_wa = MagicMock()
 
@@ -159,11 +158,10 @@ def test_execute_learning_background_pipeline_all_success(mock_compile, mock_ver
     assert result["subject_title"] == "Distributed Systems Foundations"
     assert result["resources_logged"] == 2
     assert result["resources_failed"] == 0
-    assert result["tasks_added"] == 2
-    assert result["tasks_failed"] == 0
+    assert result["checklist_items"] == 2
 
     # Verify Notion sequence:
-    # 1. create_subject_page with numbered_list_item children
+    # 1. create_subject_page with numbered_list_item children & starter_tasks checklist
     mock_notion.create_subject_page.assert_called_once_with(
         title="Distributed Systems Foundations",
         curriculum_topics=[
@@ -204,25 +202,21 @@ def test_execute_learning_background_pipeline_all_success(mock_compile, mock_ver
         resource_type="Video",
         subject_page_id="subj-page-123",
     )
-    # 3. create_starter_task with subject relation
-    assert mock_notion.create_starter_task.call_count == 2
-    mock_notion.create_starter_task.assert_any_call(
-        title="Read Diego Ongaro's Raft Paper",
-        subject_page_id="subj-page-123",
-    )
+    # 3. create_starter_task should NOT be called to avoid bloating Tasks DB
+    mock_notion.create_starter_task.assert_not_called()
 
     # 4. WhatsApp completion notification
     mock_wa.send_message.assert_called_once()
     sent_text = mock_wa.send_message.call_args[1]["text"]
     assert "https://notion.so/subj-page-123" in sent_text
     assert "2/2 resources logged" in sent_text
-    assert "2 starter tasks added" in sent_text
+    assert "2 starter checklist items added to subject page" in sent_text
 
 
 @patch("app.learning_service.verify_link_liveness")
 @patch("app.learning_service.compile_learning_curriculum")
 def test_execute_learning_background_pipeline_partial_failure(mock_compile, mock_verify):
-    """Test that a failed resource write or task write does not abort the batch
+    """Test that a failed resource write does not abort the batch
 
     and that the completion message explicitly reports partial failures (e.g. 4/5 logged, 1 failed).
     """
@@ -253,11 +247,6 @@ def test_execute_learning_background_pipeline_partial_failure(mock_compile, mock
         {"id": "res-4"},
         {"id": "res-5"},
     ]
-    # Starter tasks: 2 tasks succeed
-    mock_notion.create_starter_task.side_effect = [
-        {"id": "task-1"},
-        {"id": "task-2"},
-    ]
 
     mock_wa = MagicMock()
 
@@ -271,14 +260,15 @@ def test_execute_learning_background_pipeline_partial_failure(mock_compile, mock
 
     assert result["resources_logged"] == 4
     assert result["resources_failed"] == 1
-    assert result["tasks_added"] == 2
+    assert result["checklist_items"] == 2
+    mock_notion.create_starter_task.assert_not_called()
 
     # Check that the summary message reflects partial failure
     mock_wa.send_message.assert_called_once()
     sent_text = mock_wa.send_message.call_args[1]["text"]
     assert "4/5 resources logged" in sent_text
     assert "1 failed (rate limited)" in sent_text
-    assert "2 starter tasks added" in sent_text
+    assert "2 starter checklist items added to subject page" in sent_text
 
 
 @patch("app.learning_service.verify_link_liveness")
@@ -306,7 +296,6 @@ def test_execute_learning_background_pipeline_dropped_invalid_links(mock_compile
         "url": "https://notion.so/subj-789",
     }
     mock_notion.create_resource_row.return_value = {"id": "res-1"}
-    mock_notion.create_starter_task.return_value = {"id": "task-1"}
 
     mock_wa = MagicMock()
 
@@ -322,3 +311,5 @@ def test_execute_learning_background_pipeline_dropped_invalid_links(mock_compile
     assert mock_notion.create_resource_row.call_count == 1
     assert result["resources_logged"] == 1
     assert result["resources_failed"] == 0
+    assert result["checklist_items"] == 1
+    mock_notion.create_starter_task.assert_not_called()

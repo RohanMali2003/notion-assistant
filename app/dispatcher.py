@@ -554,6 +554,9 @@ _ACTION_HANDLERS = {
 }
 
 
+from app.module_handlers import handler_registry
+
+
 async def execute_module_action(
     module: str,
     parsed_result: Any,
@@ -561,11 +564,14 @@ async def execute_module_action(
     notion_client: NotionAssistantClient,
     sender_id: Optional[str] = None,
 ) -> str:
-    """Execute standard synchronous actions for modules via clean dispatch table."""
-    handler = _ACTION_HANDLERS.get(module)
-    if handler:
-        return await handler(parsed_result, text, notion_client, sender_id)
-    return f"📝 *Recorded:*\n{text}"
+    """Execute module action polymorphically via handler_registry."""
+    return await handler_registry.execute(
+        module=module,
+        parsed_result=parsed_result,
+        text=text,
+        notion_client=notion_client,
+        sender_id=sender_id,
+    )
 
 
 async def process_incoming_text_message(
@@ -639,6 +645,26 @@ async def process_incoming_text_message(
         )
         conversation_memory.add_assistant_message(sender_id, reply_text, module="MOTION")
         return None
+
+    # 3.5 Check for Instant Deterministic Fast-Paths (0ms LLM Latency)
+    clean_lower = text.strip().lower().rstrip(".!?")
+    if clean_lower in ("today", "todays tasks", "today's tasks", "what's due today", "what is due today", "what's on my plate", "what is on my plate", "today tasks"):
+        conversation_memory.add_user_message(sender_id, text)
+        fast_result = TaskAnalysis(intent="QUERY_TODAY")
+        reply_text = await execute_module_action("TASKS", fast_result, text, notion_client, sender_id=sender_id)
+        if reply_text:
+            send_notification(reply_text, to_phone=to_phone, chat_id=chat_id, whatsapp_client=whatsapp_client, telegram_client=telegram_client)
+            conversation_memory.add_assistant_message(sender_id, reply_text, module="TASKS")
+        return reply_text
+
+    if clean_lower in ("undo", "undo that", "revert", "revert that", "cancel last action", "undo last task"):
+        conversation_memory.add_user_message(sender_id, text)
+        fast_result = RollbackAnalysis(command="ROLLBACK_LAST")
+        reply_text = await execute_module_action("ROLLBACK", fast_result, text, notion_client, sender_id=sender_id)
+        if reply_text:
+            send_notification(reply_text, to_phone=to_phone, chat_id=chat_id, whatsapp_client=whatsapp_client, telegram_client=telegram_client)
+            conversation_memory.add_assistant_message(sender_id, reply_text, module="ROLLBACK")
+        return reply_text
 
     # 4. Context Enrichment
     conversation_memory.add_user_message(sender_id, text)
